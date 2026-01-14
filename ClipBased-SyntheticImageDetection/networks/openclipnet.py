@@ -67,7 +67,7 @@ class OpenClipLinear(nn.Module):
             return hook
         
         if self.layers_to_extract is not None:
-            for i in range(self.layers_to_extract):
+            for i in self.layers_to_extract:
                 if i < len(self.bb[0].visual.trasformer.resblocks):
                     # The register forward hook registers a "hook" to extract the output of the layer
                     self.bb[0].visual.transformer.resblocks[i].register_forward_hook(get_activation(f'block_{i}'))
@@ -99,6 +99,6 @@ class OpenClipLinear(nn.Module):
     # Take the input x and pass it through the whole network, then return the output - True/False
     def forward(self, x):
         features = self.forward_features(x)
-        if features.isinstance(features, dict):
+        if isinstance(features, dict):
             return features['final']
         return features 
