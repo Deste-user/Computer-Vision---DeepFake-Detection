@@ -116,7 +116,7 @@ def create_embeddings():
 
                 data = create_dataset_embeddings(img_dir, model, label)
                 torch.save(data, os.path.join(out_dir, "embeddings.pt"))
-
+                print(f"Saved embeddings for class '{cls}' split '{split}' to '{out_dir}/embeddings.pt'")
 
 def train_classificators(model_string, device, num_epochs=10,batch_size=64):
     if torch.cuda.is_available():
