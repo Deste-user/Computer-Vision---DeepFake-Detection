@@ -102,6 +102,8 @@ def create_embeddings():
     if not os.path.exists("dataset_embeddings"):
         #Install default the clip version 14 ViT-g-14
         model = openclipnet.OpenClipLinear(layer_to_extract=levels)
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"Using device: {device}")
 
         real_imgs_db=os.listdir(real_data_FFHQ_path)    
         fake_imgs_db_stylegan1=os.listdir(fake_data_StyleGAN1_path)
@@ -119,7 +121,7 @@ def create_embeddings():
                 out_dir = os.path.join("dataset_embeddings", cls, split)
                 os.makedirs(out_dir, exist_ok=True)
 
-                data = create_dataset_embeddings(img_dir, model, label)
+                data = create_dataset_embeddings(img_dir, model, label,device=device)
                 torch.save(data, os.path.join(out_dir, "embeddings.pt"))
                 print(f"Saved embeddings for class '{cls}' split '{split}' to '{out_dir}/embeddings.pt'")
 
