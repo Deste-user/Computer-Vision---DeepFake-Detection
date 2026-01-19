@@ -1,6 +1,6 @@
 import torch
 import torch.nn as nn
-#import open_clip
+import open_clip
 import sys
 from tqdm import tqdm
 import os
