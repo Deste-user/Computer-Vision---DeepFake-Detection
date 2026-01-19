@@ -68,7 +68,7 @@ class OpenClipLinear(nn.Module):
         
         if self.layers_to_extract is not None:
             for i in self.layers_to_extract:
-                if i < len(self.bb[0].visual.trasformer.resblocks):
+                if i < len(self.bb[0].visual.transformer.resblocks):
                     # The register forward hook registers a "hook" to extract the output of the layer
                     self.bb[0].visual.transformer.resblocks[i].register_forward_hook(get_activation(f'block_{i}'))
         
