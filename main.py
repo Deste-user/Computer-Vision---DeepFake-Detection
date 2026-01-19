@@ -9,6 +9,7 @@ import pandas as pd
 from sklearn import svm 
 from sklearn import metrics as sk_metrics
 import joblib
+from PIL import Image
 
 levels = [1,3,5,7,9,11,13,15,17,19,21,23]
 real_data_FFHQ_path = "/oblivion/Datasets/FFHQ/images1024x1024"
@@ -62,26 +63,30 @@ def create_dataset_embeddings(img_dir, model, label, device='cpu'):
     model.to(device)
     model.eval()
 
+    # Preprocessing per CLIP
+    _, _, preprocess = open_clip.create_model_and_transforms('ViT-L-14', pretrained='commonpool_xl_s13b_b90k')
+
     sorted_layer_keys = [f'block_{i}' for i in sorted(model.layers_to_extract)]
+    
+    files = [f for f in os.listdir(img_dir) if f.lower().endswith((".png", ".jpg", ".jpeg"))]
+    
     with torch.no_grad():
-        for fname in os.listdir(img_dir):
-            if not fname.lower().endswith((".png", ".jpg", ".jpeg")): continue    
+        for fname in tqdm(files, desc=f"Processing {os.path.basename(img_dir)}"):
             img_path = os.path.join(img_dir, fname)
         
             try:
-                img = openclipnet.load_image(img_path)
-                img = img.unsqueeze(0).to(device)
+                # Carica e preprocessa l'immagine
+                img = Image.open(img_path).convert('RGB')
+                img = preprocess(img).unsqueeze(0).to(device)
 
-                print(f"Processing image: {img_path}")
-                features_dict = model.features(img)
+                features_dict = model.forward_features(img)
 
-                # Free the VRAM used by the image    
                 layers_list = [features_dict[key].squeeze(0).cpu() for key in sorted_layer_keys if key in features_dict]
-                stacked_embeddings = torch.stack(layers_list,dim=0)
+                stacked_embeddings = torch.stack(layers_list, dim=0)
                 
                 tensors.append({
                     "image": fname,
-                    "label": 1 if label else 0,
+                    "label": int(label),
                     "embeddings": stacked_embeddings
                 })
             except Exception as e:
@@ -89,7 +94,7 @@ def create_dataset_embeddings(img_dir, model, label, device='cpu'):
                 continue    
 
             model.intermediate_features = {}
-            # Save or process the embeddings as needed
+    
     return tensors
 
 
@@ -108,7 +113,7 @@ def create_embeddings():
         
         splits = ['train_set', 'val_set', 'test_set']
 
-        for cls, (base_path, label) in classes.items():
+        for cls, (base_path, label) in tqdm(classes.items()):
             for split in splits:
                 img_dir = os.path.join(base_path, split)
                 out_dir = os.path.join("dataset_embeddings", cls, split)
