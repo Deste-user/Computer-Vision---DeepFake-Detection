@@ -278,6 +278,8 @@ if __name__ == "__main__":
 
     if args['create_embeddings']:
         create_embeddings()
+        print("Embeddings created. Exiting.")
+        sys.exit(0)
 
     model_string = args['classificator_model']
 
