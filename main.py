@@ -13,7 +13,7 @@ import joblib
 levels = [1,3,5,7,9,11,13,15,17,19,21,23]
 real_data_FFHQ_path = "/oblivion/Datasets/FFHQ/images1024x1024"
 fake_data_StyleGAN1_path = "/oblivion/Datasets/FFHQ/generated/stylegan1-psi-0.5/images1024x1024"
-fake_data_StableDiffusion_path = "/oblivion/Datasets/FFHQ/generate/sdv1_4/images1024x1024"
+fake_data_StableDiffusion_path = "/oblivion/Datasets/FFHQ/generated/sdv1_4/images1024x1024"
 script_dir = os.path.dirname(os.path.abspath(__file__))
 repo_path = os.path.join(script_dir, 'ClipBased-SyntheticImageDetection')
 sys.path.append(repo_path)
@@ -57,7 +57,7 @@ def get_separated_dataloaders(embeddings_base_path, batch_size=32,split='train')
     return loader    
 
 
-def create_dataset_embeddings(img_dir, model, real,device='cpu'):
+def create_dataset_embeddings(img_dir, model, label, device='cpu'):
     tensors = []
     model.to(device)
     model.eval()
@@ -81,7 +81,7 @@ def create_dataset_embeddings(img_dir, model, real,device='cpu'):
                 
                 tensors.append({
                     "image": fname,
-                    "label": 1 if real else 0,
+                    "label": 1 if label else 0,
                     "embeddings": stacked_embeddings
                 })
             except Exception as e:
