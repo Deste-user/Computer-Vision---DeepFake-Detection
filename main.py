@@ -2,10 +2,12 @@ import torch
 import torch.nn as nn
 #import open_clip
 import sys
+from tqdm import tqdm
 import os
 import numpy as np
 import pandas as pd
-from sklearn import svm
+from sklearn import svm 
+from sklearn import metrics as sk_metrics
 import joblib
 
 levels = [1,3,5,7,9,11,13,15,17,19,21,23]
@@ -79,7 +81,7 @@ def create_dataset_embeddings(img_dir, model, real,device='cpu'):
                 
                 tensors.append({
                     "image": fname,
-                    "label": 0 if real else 1,
+                    "label": 1 if real else 0,
                     "embeddings": stacked_embeddings
                 })
             except Exception as e:
@@ -143,7 +145,7 @@ def train_classificators(model_string, device, num_epochs=10,batch_size=64):
                 criterion = nn.CrossEntropyLoss()
                 optimizer = torch.optim.Adam(classificator.parameters(), lr=0.001)
 
-                for epoch in range(num_epochs):
+                for epoch in tqdm(range(num_epochs)):
                     classificator.train()
                     running_loss = 0.0
                     for embeddings, labels, _ in data_train:
@@ -173,9 +175,9 @@ def train_classificators(model_string, device, num_epochs=10,batch_size=64):
             elif model_string == "svm":
                 all_embeddings = []
                 all_labels = []
-                for embeddings, labels in data_train:
-                    all_embeddings.append(embeddings[:, level_idx, :].numpy())
-                    all_labels.append(labels.numpy())
+                for embeddings, labels, _ in data_train:
+                    all_embeddings.append(embeddings[:, level_idx, :].cpu().numpy())
+                    all_labels.append(labels.cpu().numpy())
                 
                 X = np.concatenate(all_embeddings, axis=0)
                 y = np.concatenate(all_labels, axis=0)
@@ -225,7 +227,7 @@ def test_classificators_in_dataset(device, model_string="svm",batch_size=64):
             all_labels.append(labels.cpu())
             all_filenames.extend(filename)
 
-            types = ['real' if l == 0 else 'fake_stylegan1' for l in labels.numpy()]
+            types = ['real' if l == 0 else 'fake_stylegan1' for l in labels.cpu().numpy()]
             all_types.extend(types)
 
             for level_idx, classificator in enumerate(arrays_classificators):
@@ -237,7 +239,7 @@ def test_classificators_in_dataset(device, model_string="svm",batch_size=64):
                     probs = torch.softmax(outputs, dim=1)[:, 1]  
                     all_outputs[level_idx].append(probs.cpu())
                 elif model_string == "svm":
-                    probs = classificator.predict_proba(embeddings_level.numpy())[:, 1] 
+                    probs = classificator.predict_proba(embeddings_level.cpu().numpy())[:, 1] 
                     all_outputs[level_idx].append(torch.tensor(probs))
 
 
