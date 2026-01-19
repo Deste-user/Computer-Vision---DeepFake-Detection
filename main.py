@@ -106,7 +106,7 @@ def create_embeddings():
             "fake_stylegan1": (fake_data_StyleGAN1_path, 1),
             "fake_stablediffusion": (fake_data_StableDiffusion_path, 1)}
         
-        splits = ['train', 'val', 'test']
+        splits = ['train_set', 'val_set', 'test_set']
 
         for cls, (base_path, label) in classes.items():
             for split in splits:
