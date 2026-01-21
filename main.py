@@ -39,18 +39,19 @@ class DataLoaderEmbeddings(torch.utils.data.Dataset):
         return self.embeddings[idx], self.labels[idx], self.image_names[idx]
 
 
-def get_separated_dataloaders(embeddings_base_path, batch_size=32,split='train'):    
+def get_separated_dataloaders(embeddings_base_path, batch_size=32,split='train_set'):    
     loader = {}
 
     if not os.path.exists(embeddings_base_path):
         raise FileNotFoundError(f"Embeddings path '{embeddings_base_path}' does not exist.")
     datasets_names=[d for d in os.listdir(embeddings_base_path) if os.path.isdir(os.path.join(embeddings_base_path,d))]
+    print (datasets_names)
 
     for name  in datasets_names:
         pt_path=os.path.join(embeddings_base_path,name,split,"embeddings.pt")
         if os.path.exists(pt_path):
            ds = DataLoaderEmbeddings(pt_path)
-           is_train = (split=='train')
+           is_train = (split=='train_set')
 
            dl = torch.utils.data.DataLoader(ds, batch_size=batch_size, shuffle=is_train, num_workers=4,pin_memory=True)
            loader[name] = dl
@@ -125,84 +126,134 @@ def create_embeddings():
                 torch.save(data, os.path.join(out_dir, "embeddings.pt"))
                 print(f"Saved embeddings for class '{cls}' split '{split}' to '{out_dir}/embeddings.pt'")
 
-def train_classificators(model_string, device, num_epochs=10,batch_size=64):
+def train_classificators(model_string='mlp', device=None, num_epochs=10,batch_size=32):
     if torch.cuda.is_available():
         device = torch.device("cuda")
+        print("Using GPU for training.\n", flush=True)
     else:
-        device = torch.device("cpu")    
+        print("Using CPU for training.\n", flush=True)
+        device = torch.device("cpu")
+
     if not os.path.exists(f"classificators/{model_string}"):
         os.makedirs(f"classificators/{model_string}")
 
-        train_loader = get_separated_dataloaders("dataset_embeddings", batch_size=64, split='train')
-        ds = torch.utils.data.ConcatDataset([train_loader['real'].dataset, train_loader['fake_stylegan1'].dataset])
-        BATCH_SIZE = 128
-        data_train = torch.utils.data.DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
+    train_loader = get_separated_dataloaders("dataset_embeddings", batch_size=batch_size, split='train_set')
+    val_loader = get_separated_dataloaders("dataset_embeddings", batch_size=batch_size, split='val_set')
+    ds = torch.utils.data.ConcatDataset([train_loader['real'].dataset, train_loader['fake_stylegan1'].dataset])
+    ds_val = torch.utils.data.ConcatDataset([ds, val_loader['real'].dataset, val_loader['fake_stylegan1'].dataset])
+    BATCH_SIZE = batch_size
+    
+    data_train = torch.utils.data.DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
+    data_val = torch.utils.data.DataLoader(ds_val, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
 
-        arrays_classificators = []
-        N_LEVELS = len(levels)
-        for level_idx in range(N_LEVELS):
-            print(f"Training classificator for level {levels[level_idx]}")
-            if model_string == "mlp":
-                classificator = nn.Sequential(
-                    nn.Linear(768, 256),
-                    nn.ReLU(),
-                    nn.Linear(256, 2)
-                ).to(device)
+    print ("Training classificators on dataset with", len(data_train.dataset), "samples.")
 
-                criterion = nn.CrossEntropyLoss()
-                optimizer = torch.optim.Adam(classificator.parameters(), lr=0.001)
+    arrays_classificators = []
+    N_LEVELS = len(levels)
+    for level_idx in range(N_LEVELS):
+        print(f"Training classificator for level {levels[level_idx]}\n")
+        if model_string == "mlp":
+            classificator = nn.Sequential(
+                nn.Linear(1024, 256),
+                nn.ReLU(),
+                nn.Linear(256, 2)
+            ).to(device)
+            # In this Loss is already included Softmax.
+            criterion = nn.CrossEntropyLoss()
+            optimizer = torch.optim.AdamW(classificator.parameters(), lr=0.001)
 
-                for epoch in tqdm(range(num_epochs)):
-                    classificator.train()
-                    running_loss = 0.0
-                    for embeddings, labels, _ in data_train:
+            # Early stopping parameters
+            best_val_loss = float('inf')
+            patience = 3  # Numero di epoch senza miglioramento prima di fermarsi
+            patience_counter = 0
+            best_model_state = None
+
+            for epoch in range(num_epochs):
+                classificator.train()
+                running_loss = 0.0
+                for embeddings, labels, _ in tqdm(data_train, desc=f"Epoch {epoch+1}/{num_epochs}", leave=False):
+                    embeddings_level = embeddings[:, level_idx, :].to(device)
+                    labels = labels.to(device)
+
+                    optimizer.zero_grad()
+
+                    #Forward pass
+                    outputs = classificator(embeddings_level)
+
+                    #Criterio di loss
+                    loss = criterion(outputs, labels)
+                    
+                    #avg gradients
+                    loss.backward()
+
+                    # Update weights
+                    optimizer.step()
+
+                    running_loss += loss.item() * embeddings.size(0)
+
+                epoch_loss = running_loss / len(data_train.dataset)
+
+                # Validation
+                classificator.eval()
+                val_loss = 0.0
+                with torch.no_grad():
+                    for embeddings, labels, _ in data_val:
                         embeddings_level = embeddings[:, level_idx, :].to(device)
                         labels = labels.to(device)
-
-                        optimizer.zero_grad()
-
-                        #Forward pass
                         outputs = classificator(embeddings_level)
-
-                        #Criiterio di loss
                         loss = criterion(outputs, labels)
-                        
-                        #avg gradients
-                        loss.backward()
+                        val_loss += loss.item() * embeddings.size(0)
+                val_loss /= len(data_val.dataset)
+                print(f"\nEpoch {epoch+1}/{num_epochs}, Loss : {epoch_loss:.4f}, Val Loss : {val_loss:.4f}\n")
 
-                        # Update weights
-                        optimizer.step()
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    patience_counter = 0
+                    best_model_state = classificator.state_dict().copy()
+                    print("  Saving best model...\n", flush=True)
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        print("Early stopping triggered.\n", flush=True)
+                        break
 
-                        running_loss += loss.item() * embeddings.size(0)
+            torch.save(classificator.state_dict(), f'classificators/{model_string}/classificator_level_{levels[level_idx]}.pt')
+        elif model_string == "svm":
+            from sklearn.svm import LinearSVC
+            from sklearn.calibration import CalibratedClassifierCV    
 
-                    epoch_loss = running_loss / len(data_train.dataset)
-                    print(f"Epoch {epoch+1}/{num_epochs}, Loss: {epoch_loss:.4f}")
+            all_embeddings = []
+            all_labels = []
+            for embeddings, labels, _ in tqdm(data_train):
+                all_embeddings.append(embeddings[:, level_idx, :].cpu().numpy())
+                all_labels.append(labels.cpu().numpy())
+            
+            X = np.concatenate(all_embeddings, axis=0)
+            y = np.concatenate(all_labels, axis=0)
 
-                torch.save(classificator.state_dict(), f'classificators/{model_string}/classificator_level_{levels[level_idx]}.pt')
-            elif model_string == "svm":
-                all_embeddings = []
-                all_labels = []
-                for embeddings, labels, _ in data_train:
-                    all_embeddings.append(embeddings[:, level_idx, :].cpu().numpy())
-                    all_labels.append(labels.cpu().numpy())
-                
-                X = np.concatenate(all_embeddings, axis=0)
-                y = np.concatenate(all_labels, axis=0)
-                
-                classificator = svm.SVC(probability=True)
-                classificator.fit(X, y)
-                joblib.dump(classificator, f'classificators/{model_string}/classificator_level_{levels[level_idx]}.pkl')
-
-                    
+            print(f"Training LinearSVC on {X.shape[0]} samples...", flush=True)
+            
+            classificator = LinearSVC(max_iter=10000)
+            classificator = CalibratedClassifierCV(classificator, cv=3)
+            classificator.fit(X, y)
+            joblib.dump(classificator, f'classificators/{model_string}/classificator_level_{levels[level_idx]}.pkl')
+            print(f"Saved!", flush=True)
 
 
-def test_classificators_in_dataset(device, model_string="svm",batch_size=64):    
+#TODO: Implement the train with stable diffusion data as well
+def test_classificators_in_dataset(cross_validate, device=None, model_string="mlp",batch_size=64):    
+    if torch.cuda.is_available():
+        device = torch.device("cuda")
+        print("Using GPU for testing.")
+    else:
+        device = torch.device("cpu")    
+    
     #Load classificators
     arrays_classificators = []
     for level in levels:
         if model_string == "mlp":
             classificator = nn.Sequential(
-                nn.Linear(768, 256),
+                nn.Linear(1024, 256),
                 nn.ReLU(),
                 nn.Linear(256, 2)
             ).to(device)
@@ -217,12 +268,20 @@ def test_classificators_in_dataset(device, model_string="svm",batch_size=64):
 
 
    ## Testing the classificator on the test set.
-    test_loader = get_separated_dataloaders("dataset_embeddings", batch_size=batch_size, split='test')
+    test_loader = get_separated_dataloaders("dataset_embeddings", batch_size=1, split='test_set')
     ds_test_real = test_loader['real']
-    ds_test_fake_stylegan1 = test_loader['fake_stylegan1']
+    string_cross_val = None
+    if cross_validate is not True:
+        ds_test_fake = test_loader['fake_stylegan1']
+        string_cross_val = "_StyleGAN1_data_"
+    else:
+        print("Cross validating on Stable Diffusion generated data.")
+        ds_test_fake = test_loader['fake_stablediffusion']
+        string_cross_val = "_Stable_Diffusion_data_"
+   
 
-    ds_test = torch.utils.data.ConcatDataset([ds_test_real.dataset, ds_test_fake_stylegan1.dataset])
-    data_test = torch.utils.data.DataLoader(ds_test, batch_size=batch_size, shuffle=False, num_workers=2)
+    ds_test = torch.utils.data.ConcatDataset([ds_test_real.dataset, ds_test_fake.dataset])
+    data_test = torch.utils.data.DataLoader(ds_test, batch_size=1, shuffle=False, num_workers=0)
 
     all_labels = []
     all_filenames = []
@@ -230,11 +289,13 @@ def test_classificators_in_dataset(device, model_string="svm",batch_size=64):
     all_outputs = [[] for _ in levels]
 
     with torch.no_grad():
-        for embeddings, labels,filename in data_test:
+        for embeddings, labels,filename in tqdm(data_test):
             all_labels.append(labels.cpu())
             all_filenames.extend(filename)
-
-            types = ['real' if l == 0 else 'fake_stylegan1' for l in labels.cpu().numpy()]
+            if cross_validate is not True:
+                types = ['real' if l == 0 else 'fake_stylegan1' for l in labels.cpu().numpy()]
+            else: 
+                types = ['real' if l == 0 else 'Stable Diffusion data' for l in labels.cpu().numpy()]    
             all_types.extend(types)
 
             for level_idx, classificator in enumerate(arrays_classificators):
@@ -263,8 +324,8 @@ def test_classificators_in_dataset(device, model_string="svm",batch_size=64):
         results[f'level_{level}'] = all_outputs[level_idx]
 
     df = pd.DataFrame(results)
-    df.to_csv("test_results.csv", index=False)
-    print("Test results saved to test_results.csv")
+    df.to_csv("test_results"+string_cross_val+model_string+".csv", index=False)
+    print("Test results saved to test_results"+string_cross_val+model_string+".csv")
 
 
 
@@ -275,9 +336,10 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use for computation")
     parser.add_argument("--classificator_model",type=str, choices=["mlp","svm"], default="mlp", help="Type of classificator model to use")
     parser.add_argument("--create_embeddings", action='store_true', help="Flag to create embeddings")
-    parser.add_argument("--mode", type=str, choices=["train", "test"], default="test", help="Mode: train or test the classificator")
+    parser.add_argument("--mode", type=str, choices=["train", "test"], help="Mode: train or test the classificator")
     parser.add_argument("--num_epochs", type=int, default=10, help="Number of epochs for training")
     parser.add_argument("--metrics", action='store_true', help="Flag to compute metrics after testing")
+    parser.add_argument("--cross_validate", action='store_true', help="Flag to cross validate on stable diffusion data during testing")
 
     args= vars(parser.parse_args())
 
@@ -288,21 +350,32 @@ if __name__ == "__main__":
         print("Embeddings created. Exiting.")
         sys.exit(0)
 
+    if args['cross_validate']:
+        cross_val = True
+        print("Cross validation enabled.")
+    else:
+        print("Cross validation disabled.")
+        cross_val = False    
+
     model_string = args['classificator_model']
 
     if args['mode'] == "train":
         train_classificators(model_string, device, num_epochs=args['num_epochs'], batch_size=args['batch_size'])
     elif args['mode'] == "test":
-        test_classificators_in_dataset(device, model_string, batch_size=args['batch_size'])
+        test_classificators_in_dataset(cross_val, device, model_string, batch_size=args['batch_size'])
 
     if args['metrics']:
         from compute_metrics import compute_metrics, dict_metrics
-        tab_metrics = compute_metrics("test_results.csv", "test_results.csv", dict_metrics['auc'])
+        
+
+        tab_metrics = compute_metrics("test_results_StyleGAN1_data_mlp.csv", "test_results_StyleGAN1_data_mlp.csv", dict_metrics['auc'])
         print(tab_metrics.to_string(float_format=lambda x: '%5.3f'%x))
 
+
         acc_05 = lambda label, score: sk_metrics.balanced_accuracy_score(label, score > 0.5)
-        tab_acc = compute_metrics("test_results.csv", "test_results.csv", acc_05)
-        print("\n=== Balanced Accuracy (threshold=0.5) ===")
+        
+        tab_acc = compute_metrics("test_results_Stable_Diffusion_data_mlp.csv", "test_results_Stable_Diffusion_data_mlp.csv", dict_metrics['auc'])
+        
         print(tab_acc.to_string(float_format=lambda x: '%5.3f'%x))
 
 

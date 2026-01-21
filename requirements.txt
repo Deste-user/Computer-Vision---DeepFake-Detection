@@ -1,0 +1,16 @@
+# PyTorch (scegli la versione appropriata per il tuo sistema)
+torch>=2.0.0
+torchvision>=0.15.0
+
+# OpenCLIP per i modelli CLIP
+open_clip_torch>=2.20.0
+
+# Data Science
+numpy>=1.24.0
+pandas>=2.0.0
+scikit-learn>=1.3.0
+
+# Utilità
+tqdm>=4.65.0
+joblib>=1.3.0
+Pillow>=9.5.0

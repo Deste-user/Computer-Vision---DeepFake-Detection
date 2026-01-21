@@ -11,9 +11,12 @@ dict_metrics = {
 
 
 def compute_metrics(input_csv, output_csv, metrics_fun):
+    print("Loading results from %s"%output_csv)
     table = pandas.read_csv(output_csv)
-    list_algs = [_ for _ in table.columns if _!='filename']
-    table = pandas.read_csv(input_csv).merge(table, on=['filename', ])
+    list_algs = [_ for _ in table.columns if _ not in ['filename', 'typ']]
+    print(f'list_args:', list_algs)
+    if input_csv != output_csv:
+        table = pandas.read_csv(input_csv).merge(table, on=['filename','typ'])
     assert 'typ' in table
     list_typs = sorted([_ for _ in set(table['typ']) if _!='real'])
     table['label'] = table['typ']!='real'
