@@ -1,3 +1,4 @@
+from sklearn.linear_model import SGDClassifier
 import torch
 import torch.nn as nn
 import open_clip
@@ -233,7 +234,7 @@ def train_classificators(model_string='mlp', device=None, num_epochs=10,batch_si
 
             print(f"Training LinearSVC on {X.shape[0]} samples...", flush=True)
             
-            classificator = LinearSVC(max_iter=10000)
+            classificator = SGDClassifier(loss='hinge', max_iter=1000, tol=1e-3)
             classificator = CalibratedClassifierCV(classificator, cv=3)
             classificator.fit(X, y)
             joblib.dump(classificator, f'classificators/{model_string}/classificator_level_{levels[level_idx]}.pkl')
