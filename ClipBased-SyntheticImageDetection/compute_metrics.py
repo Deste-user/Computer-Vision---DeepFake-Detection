@@ -6,7 +6,7 @@ from sklearn import metrics
 
 dict_metrics = {
     'auc' : lambda label, score: metrics.roc_auc_score(label,  score),
-    'acc' : lambda label, score: metrics.balanced_accuracy_score(label, score>0),
+    'acc' : lambda label, score: metrics.balanced_accuracy_score(label, score>0.5),
 }
 
 

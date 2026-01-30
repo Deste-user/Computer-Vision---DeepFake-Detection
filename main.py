@@ -11,11 +11,16 @@ from sklearn import svm
 from sklearn import metrics as sk_metrics
 import joblib
 from PIL import Image
+import glob
+import openpyxl
 
 levels = [1,3,5,7,9,11,13,15,17,19,21,23]
 real_data_FFHQ_path = "/oblivion/Datasets/FFHQ/images1024x1024"
 fake_data_StyleGAN1_path = "/oblivion/Datasets/FFHQ/generated/stylegan1-psi-0.5/images1024x1024"
 fake_data_StableDiffusion_path = "/oblivion/Datasets/FFHQ/generated/sdv1_4/images1024x1024"
+OUTPUT_FILE = "report_result.xlsx"
+ACC_THRESHOLD = 0.5
+
 script_dir = os.path.dirname(os.path.abspath(__file__))
 repo_path = os.path.join(script_dir, 'ClipBased-SyntheticImageDetection')
 sys.path.append(repo_path)
@@ -127,7 +132,7 @@ def create_embeddings():
                 torch.save(data, os.path.join(out_dir, "embeddings.pt"))
                 print(f"Saved embeddings for class '{cls}' split '{split}' to '{out_dir}/embeddings.pt'")
 
-def train_classificators(model_string='mlp', device=None, num_epochs=10,batch_size=32):
+def train_classificators(model_string='mlp', device=None, num_epochs=10,batch_size=32, train_dataset="stylegan1"):
     if torch.cuda.is_available():
         device = torch.device("cuda")
         print("Using GPU for training.\n", flush=True)
@@ -135,27 +140,28 @@ def train_classificators(model_string='mlp', device=None, num_epochs=10,batch_si
         print("Using CPU for training.\n", flush=True)
         device = torch.device("cpu")
 
-    if not os.path.exists(f"classificators/{model_string}"):
-        os.makedirs(f"classificators/{model_string}")
+    if not os.path.exists(f"classificators/{model_string}/{train_dataset}"):
+        os.makedirs(f"classificators/{model_string}/{train_dataset}")
 
     train_loader = get_separated_dataloaders("dataset_embeddings", batch_size=batch_size, split='train_set')
     val_loader = get_separated_dataloaders("dataset_embeddings", batch_size=batch_size, split='val_set')
-    ds = torch.utils.data.ConcatDataset([train_loader['real'].dataset, train_loader['fake_stylegan1'].dataset])
-    ds_val = torch.utils.data.ConcatDataset([ds, val_loader['real'].dataset, val_loader['fake_stylegan1'].dataset])
+    ds = torch.utils.data.ConcatDataset([train_loader['real'].dataset, train_loader[f'fake_{train_dataset}'].dataset])
+    ds_val = torch.utils.data.ConcatDataset([ds, val_loader['real'].dataset, val_loader[f'fake_{train_dataset}'].dataset])
     BATCH_SIZE = batch_size
     
     data_train = torch.utils.data.DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
     data_val = torch.utils.data.DataLoader(ds_val, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
-
+    print (f"Training classificators on dataset '{train_dataset}'")
     print ("Training classificators on dataset with", len(data_train.dataset), "samples.")
 
     arrays_classificators = []
+    input_dim = ds[0][0].shape[-1]
     N_LEVELS = len(levels)
     for level_idx in range(N_LEVELS):
         print(f"Training classificator for level {levels[level_idx]}\n")
         if model_string == "mlp":
             classificator = nn.Sequential(
-                nn.Linear(1024, 256),
+                nn.Linear(input_dim, 256),
                 nn.ReLU(),
                 nn.Linear(256, 2)
             ).to(device)
@@ -218,7 +224,7 @@ def train_classificators(model_string='mlp', device=None, num_epochs=10,batch_si
                         print("Early stopping triggered.\n", flush=True)
                         break
 
-            torch.save(classificator.state_dict(), f'classificators/{model_string}/classificator_level_{levels[level_idx]}.pt')
+            torch.save(classificator.state_dict(), f'classificators/{model_string}/{train_dataset}/classificator_level_{levels[level_idx]}.pt')
         elif model_string == "svm":
             from sklearn.svm import LinearSVC
             from sklearn.calibration import CalibratedClassifierCV    
@@ -237,12 +243,12 @@ def train_classificators(model_string='mlp', device=None, num_epochs=10,batch_si
             classificator = SGDClassifier(loss='hinge', max_iter=1000, tol=1e-3)
             classificator = CalibratedClassifierCV(classificator, cv=3)
             classificator.fit(X, y)
-            joblib.dump(classificator, f'classificators/{model_string}/classificator_level_{levels[level_idx]}.pkl')
+            joblib.dump(classificator, f'classificators/{model_string}/{train_dataset}/classificator_level_{levels[level_idx]}.pkl')
             print(f"Saved!", flush=True)
 
 
 #TODO: Implement the train with stable diffusion data as well
-def test_classificators_in_dataset(cross_validate, device=None, model_string="mlp",batch_size=64):    
+def test_classificators_in_dataset(cross_validate, device=None, model_string="mlp",batch_size=64, test_dataset="stylegan1"):    
     if torch.cuda.is_available():
         device = torch.device("cuda")
         print("Using GPU for testing.")
@@ -258,10 +264,10 @@ def test_classificators_in_dataset(cross_validate, device=None, model_string="ml
                 nn.ReLU(),
                 nn.Linear(256, 2)
             ).to(device)
-            classificator.load_state_dict(torch.load(f'classificators/{model_string}/classificator_level_{level}.pt'))
+            classificator.load_state_dict(torch.load(f'classificators/{model_string}/{test_dataset}/classificator_level_{level}.pt'))
             classificator.eval()
         elif model_string == "svm":
-            classificator = joblib.load(f'classificators/{model_string}/classificator_level_{level}.pkl')
+            classificator = joblib.load(f'classificators/{model_string}/{test_dataset}/classificator_level_{level}.pkl')
         
 
         arrays_classificators.append(classificator)
@@ -269,20 +275,38 @@ def test_classificators_in_dataset(cross_validate, device=None, model_string="ml
 
 
    ## Testing the classificator on the test set.
-    test_loader = get_separated_dataloaders("dataset_embeddings", batch_size=1, split='test_set')
+    test_loader = get_separated_dataloaders("dataset_embeddings", batch_size=batch_size, split='test_set')
     ds_test_real = test_loader['real']
     string_cross_val = None
-    if cross_validate is not True:
-        ds_test_fake = test_loader['fake_stylegan1']
-        string_cross_val = "_StyleGAN1_data_"
+    label = None
+
+    if test_dataset == "stylegan1":
+        if cross_validate is not True:
+            ds_test_fake = test_loader[f'fake_{test_dataset}']
+            string_cross_val="_StyleGAN1_data_"
+            label = "stylegan1"    
+        else:
+            ds_test_fake = test_loader['fake_stablediffusion']
+            string_cross_val="SG_vs_Stable_Diffusion_data_"
+            label = "stablediffusion"    
+    elif test_dataset == "stablediffusion":
+        if cross_validate is not True:
+            ds_test_fake = test_loader[f'fake_{test_dataset}']
+            string_cross_val="_Stable_Diffusion_data_"
+            label = "stablediffusion"
+        else:
+            ds_test_fake = test_loader['fake_stylegan1']
+            string_cross_val="Stable_Diffusion_vs_SG_data_"
+            label = "stylegan1"
     else:
-        print("Cross validating on Stable Diffusion generated data.")
-        ds_test_fake = test_loader['fake_stablediffusion']
-        string_cross_val = "_Stable_Diffusion_data_"
+        print("Test dataset not recognized.")
+        return        
+
+    print (f"Testing classificators on dataset '{test_dataset}' with cross validation = {cross_validate}")
    
 
     ds_test = torch.utils.data.ConcatDataset([ds_test_real.dataset, ds_test_fake.dataset])
-    data_test = torch.utils.data.DataLoader(ds_test, batch_size=1, shuffle=False, num_workers=0)
+    data_test = torch.utils.data.DataLoader(ds_test, batch_size=batch_size, shuffle=False, num_workers=0)
 
     all_labels = []
     all_filenames = []
@@ -290,13 +314,11 @@ def test_classificators_in_dataset(cross_validate, device=None, model_string="ml
     all_outputs = [[] for _ in levels]
 
     with torch.no_grad():
-        for embeddings, labels,filename in tqdm(data_test):
+        for embeddings, labels, filename in tqdm(data_test):
             all_labels.append(labels.cpu())
             all_filenames.extend(filename)
-            if cross_validate is not True:
-                types = ['real' if l == 0 else 'fake_stylegan1' for l in labels.cpu().numpy()]
-            else: 
-                types = ['real' if l == 0 else 'Stable Diffusion data' for l in labels.cpu().numpy()]    
+
+            types = ['real' if l == 0 else label for l in labels.cpu().numpy()]    
             all_types.extend(types)
 
             for level_idx, classificator in enumerate(arrays_classificators):
@@ -328,7 +350,102 @@ def test_classificators_in_dataset(cross_validate, device=None, model_string="ml
     df.to_csv("test_results"+string_cross_val+model_string+".csv", index=False)
     print("Test results saved to test_results"+string_cross_val+model_string+".csv")
 
+def compute_metrics_for_file(filepath):
+    """Legge un CSV e restituisce un DataFrame 2 righe x N livelli (AUC e ACC)."""
+    try:
+        df = pd.read_csv(filepath)
+    except Exception as e:
+        print(f"Errore lettura {filepath}: {e}")
+        return None
 
+    if 'typ' not in df.columns:
+        return None
+
+    # Ground Truth
+    y_true = (df['typ'] != 'real').astype(int)
+    
+    # Trova e ordina le colonne dei livelli (level_1, level_3...)
+    level_cols = [c for c in df.columns if c.startswith('level_')]
+    # Ordinamento numerico (per evitare che level_11 venga prima di level_3)
+    level_cols.sort(key=lambda x: int(x.split('_')[1]))
+
+    # Dizionario per i risultati
+    results = {'Metric': ['AUC', 'ACC']}
+    
+    # Liste per calcolare la media (AVG) alla fine
+    auc_avgs = []
+    acc_avgs = []
+
+    for lvl in level_cols:
+        y_score = df[lvl].values
+        col_vals = []
+
+        # 1. Calcolo AUC
+        try:
+            if np.all(np.isfinite(y_score)):
+                val_auc = metrics.roc_auc_score(y_true, y_score)
+            else:
+                val_auc = np.nan
+        except: val_auc = np.nan
+        
+        # 2. Calcolo ACC (con soglia 0.5)
+        try:
+            val_acc = metrics.balanced_accuracy_score(y_true, y_score > ACC_THRESHOLD)
+        except: val_acc = np.nan
+
+        # Aggiungi alla colonna corrente
+        results[lvl] = [val_auc, val_acc]
+        
+        if not np.isnan(val_auc): auc_avgs.append(val_auc)
+        if not np.isnan(val_acc): acc_avgs.append(val_acc)
+
+    # Crea DataFrame
+    res_df = pd.DataFrame(results)
+    
+    # Imposta la metrica come indice (per pulizia visiva)
+    res_df.set_index('Metric', inplace=True)
+    
+    return res_df
+
+def create_report():
+    files = glob.glob("test_results_*.csv")
+    files.sort() # Ordine alfabetico dei file
+    
+    if not files:
+        print("Nessun file CSV trovato.")
+        return
+
+    print(f"Trovati {len(files)} file. Scrittura su Excel...")
+
+    try:
+        with pd.ExcelWriter(OUTPUT_FILE, engine='openpyxl') as writer:
+            row_pointer = 0
+            
+            for f in files:
+                print(f"Processing: {f}")
+                
+                # Calcola la tabellina per questo file
+                df_res = compute_metrics_for_file(f)
+                
+                if df_res is not None:
+                    # 1. Scrivi il nome del file (come titolo)
+                    # Creiamo un piccolo dataframe solo per scrivere il titolo nella cella
+                    pd.DataFrame([f]).to_excel(writer, sheet_name='Results', 
+                                               startrow=row_pointer, header=False, index=False)
+                    row_pointer += 1
+                    
+                    # 2. Scrivi la tabella dei risultati sotto il titolo
+                    df_res.to_excel(writer, sheet_name='Results', 
+                                    startrow=row_pointer, float_format="%.4f")
+                    
+                    # 3. Aggiorna il puntatore per lasciare spazio (Tabella + Titolo + Spazio vuoto)
+                    # 2 righe di dati + 1 di header + 2 di spazio = 5 righe di offset
+                    row_pointer += 5 
+                    
+        print(f"\nFatto! File salvato come: {OUTPUT_FILE}")
+        
+    except Exception as e:
+        print(f"Errore salvataggio Excel: {e}")
 
 if __name__ == "__main__":
     import argparse
@@ -339,10 +456,12 @@ if __name__ == "__main__":
     parser.add_argument("--create_embeddings", action='store_true', help="Flag to create embeddings")
     parser.add_argument("--mode", type=str, choices=["train", "test"], help="Mode: train or test the classificator")
     parser.add_argument("--num_epochs", type=int, default=10, help="Number of epochs for training")
-    parser.add_argument("--metrics", action='store_true', help="Flag to compute metrics after testing")
+    parser.add_argument("--metrics", action='store_true', help="Flag to compute metrics after testing and save results")
     parser.add_argument("--cross_validate", action='store_true', help="Flag to cross validate on stable diffusion data during testing")
+    parser.add_argument("--dataset", type=str, choices=["stylegan1", "stablediffusion"], default="stylegan1", help="Dataset to use for training/testing")
 
     args= vars(parser.parse_args())
+    dataset_name = args['dataset']
 
     device = torch.device(args['device'])
 
@@ -361,23 +480,43 @@ if __name__ == "__main__":
     model_string = args['classificator_model']
 
     if args['mode'] == "train":
-        train_classificators(model_string, device, num_epochs=args['num_epochs'], batch_size=args['batch_size'])
+        train_classificators(model_string, device, num_epochs=args['num_epochs'], batch_size=args['batch_size'],train_dataset=args['dataset'])
     elif args['mode'] == "test":
-        test_classificators_in_dataset(cross_val, device, model_string, batch_size=args['batch_size'])
+        test_classificators_in_dataset(cross_val, device, model_string, batch_size=args['batch_size'], test_dataset=args['dataset'])
 
     if args['metrics']:
         from compute_metrics import compute_metrics, dict_metrics
         
-
-        tab_metrics = compute_metrics("test_results_StyleGAN1_data_mlp.csv", "test_results_StyleGAN1_data_mlp.csv", dict_metrics['auc'])
-        print(tab_metrics.to_string(float_format=lambda x: '%5.3f'%x))
-
-
-        acc_05 = lambda label, score: sk_metrics.balanced_accuracy_score(label, score > 0.5)
+        string_cross_val = ""
+        if dataset_name == "stylegan1":
+            if not cross_val:
+                string_cross_val = "_StyleGAN1_data_"
+            else:
+                string_cross_val = "_SG_vs_Stable_Diffusion_data_"
+        elif dataset_name == "stablediffusion":
+            if not cross_val:
+                string_cross_val = "_Stable_Diffusion_data_"
+            else:
+                string_cross_val = "_Stable_Diffusion_vs_SG_data_"
         
-        tab_acc = compute_metrics("test_results_Stable_Diffusion_data_mlp.csv", "test_results_Stable_Diffusion_data_mlp.csv", dict_metrics['auc'])
-        
-        print(tab_acc.to_string(float_format=lambda x: '%5.3f'%x))
+        csv_filename = f"test_results{string_cross_val}{model_string}.csv"
+
+        if os.path.exists(csv_filename):
+            #print(f"Computing metrics {args['metrics']} on: {csv_filename}")
+            #tab_AUC = compute_metrics(csv_filename, csv_filename, dict_metrics['auc']).drop(columns=['AVG'])
+            #tab_ACC = compute_metrics(csv_filename, csv_filename, dict_metrics['acc']).drop(columns=['AVG'])
+            #tab_AUC.rename(columns={dataset_name: 'AUC'+string_cross_val}, inplace=True)
+            #tab_ACC.rename(columns={dataset_name: 'ACC'+string_cross_val}, inplace=True)
+            #result = pd.concat([tab_AUC, tab_ACC], axis=1)
+            #result.index.name = "Levels"
+            #print(result)
+            #result.to_excel(f"metrics_results.xlsx") 
+            #result.to_csv(f"metrics_results.csv")
+            #TODO: REVIEW THIS FUNCTION.
+            create_report()
+            print("Metrics report created.")
+        else:
+            print(f"File {csv_filename} not found. Cannot compute metrics.")
 
 
 
