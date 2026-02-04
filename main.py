@@ -13,6 +13,8 @@ import joblib
 from PIL import Image
 import glob
 import openpyxl
+import copy
+import matplotlib.pyplot as plt
 
 levels = [1,3,5,7,9,11,13,15,17,19,21,23]
 real_data_FFHQ_path = "/oblivion/Datasets/FFHQ/images1024x1024"
@@ -25,6 +27,7 @@ script_dir = os.path.dirname(os.path.abspath(__file__))
 repo_path = os.path.join(script_dir, 'ClipBased-SyntheticImageDetection')
 sys.path.append(repo_path)
 from networks import openclipnet
+from compute_metrics import compute_metrics, dict_metrics
 
 class DataLoaderEmbeddings(torch.utils.data.Dataset):
     def __init__(self, embeddings_file_path):
@@ -42,7 +45,11 @@ class DataLoaderEmbeddings(torch.utils.data.Dataset):
         return len(self.embeddings)
 
     def __getitem__(self, idx):
-        return self.embeddings[idx], self.labels[idx], self.image_names[idx]
+        emb = self.embeddings[idx]
+
+        emb = torch.nn.functional.normalize(emb, p=2, dim=-1)
+
+        return emb, self.labels[idx], self.image_names[idx]
 
 
 def get_separated_dataloaders(embeddings_base_path, batch_size=32,split='train_set'):    
@@ -146,7 +153,7 @@ def train_classificators(model_string='mlp', device=None, num_epochs=10,batch_si
     train_loader = get_separated_dataloaders("dataset_embeddings", batch_size=batch_size, split='train_set')
     val_loader = get_separated_dataloaders("dataset_embeddings", batch_size=batch_size, split='val_set')
     ds = torch.utils.data.ConcatDataset([train_loader['real'].dataset, train_loader[f'fake_{train_dataset}'].dataset])
-    ds_val = torch.utils.data.ConcatDataset([ds, val_loader['real'].dataset, val_loader[f'fake_{train_dataset}'].dataset])
+    ds_val = torch.utils.data.ConcatDataset([val_loader['real'].dataset, val_loader[f'fake_{train_dataset}'].dataset])
     BATCH_SIZE = batch_size
     
     data_train = torch.utils.data.DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
@@ -216,14 +223,15 @@ def train_classificators(model_string='mlp', device=None, num_epochs=10,batch_si
                 if val_loss < best_val_loss:
                     best_val_loss = val_loss
                     patience_counter = 0
-                    best_model_state = classificator.state_dict().copy()
+                    best_model_state = copy.deepcopy(classificator.state_dict())
                     print("  Saving best model...\n", flush=True)
                 else:
                     patience_counter += 1
                     if patience_counter >= patience:
                         print("Early stopping triggered.\n", flush=True)
                         break
-
+            if best_model_state is not None:        
+                classificator.load_state_dict(best_model_state)            
             torch.save(classificator.state_dict(), f'classificators/{model_string}/{train_dataset}/classificator_level_{levels[level_idx]}.pt')
         elif model_string == "svm":
             from sklearn.svm import LinearSVC
@@ -247,7 +255,6 @@ def train_classificators(model_string='mlp', device=None, num_epochs=10,batch_si
             print(f"Saved!", flush=True)
 
 
-#TODO: Implement the train with stable diffusion data as well
 def test_classificators_in_dataset(cross_validate, device=None, model_string="mlp",batch_size=64, test_dataset="stylegan1"):    
     if torch.cuda.is_available():
         device = torch.device("cuda")
@@ -257,10 +264,12 @@ def test_classificators_in_dataset(cross_validate, device=None, model_string="ml
     
     #Load classificators
     arrays_classificators = []
+    test_loader = get_separated_dataloaders("dataset_embeddings", batch_size=batch_size, split='test_set')
+    input_dim = test_loader['real'].dataset[0][0].shape[-1]
     for level in levels:
         if model_string == "mlp":
             classificator = nn.Sequential(
-                nn.Linear(1024, 256),
+                nn.Linear(input_dim, 256),
                 nn.ReLU(),
                 nn.Linear(256, 2)
             ).to(device)
@@ -273,9 +282,7 @@ def test_classificators_in_dataset(cross_validate, device=None, model_string="ml
         arrays_classificators.append(classificator)
 
 
-
    ## Testing the classificator on the test set.
-    test_loader = get_separated_dataloaders("dataset_embeddings", batch_size=batch_size, split='test_set')
     ds_test_real = test_loader['real']
     string_cross_val = None
     label = None
@@ -287,7 +294,7 @@ def test_classificators_in_dataset(cross_validate, device=None, model_string="ml
             label = "stylegan1"    
         else:
             ds_test_fake = test_loader['fake_stablediffusion']
-            string_cross_val="SG_vs_Stable_Diffusion_data_"
+            string_cross_val="_SG_vs_Stable_Diffusion_data_"
             label = "stablediffusion"    
     elif test_dataset == "stablediffusion":
         if cross_validate is not True:
@@ -296,7 +303,7 @@ def test_classificators_in_dataset(cross_validate, device=None, model_string="ml
             label = "stablediffusion"
         else:
             ds_test_fake = test_loader['fake_stylegan1']
-            string_cross_val="Stable_Diffusion_vs_SG_data_"
+            string_cross_val="_Stable_Diffusion_vs_SG_data_"
             label = "stylegan1"
     else:
         print("Test dataset not recognized.")
@@ -335,8 +342,7 @@ def test_classificators_in_dataset(cross_validate, device=None, model_string="ml
 
 
 
-   # TODO: Save results to a CSV file
-   # Create a file .csv with the result of test
+
     all_labels = torch.cat(all_labels).numpy()
     for level_idx in range(len(levels)):
         all_outputs[level_idx] = torch.cat(all_outputs[level_idx]).numpy()
@@ -347,105 +353,81 @@ def test_classificators_in_dataset(cross_validate, device=None, model_string="ml
         results[f'level_{level}'] = all_outputs[level_idx]
 
     df = pd.DataFrame(results)
-    df.to_csv("test_results"+string_cross_val+model_string+".csv", index=False)
+    os.makedirs("csv_results",exist_ok=True)
+    df.to_csv("csv_results/test_results"+string_cross_val+model_string+".csv", index=False)
     print("Test results saved to test_results"+string_cross_val+model_string+".csv")
 
-def compute_metrics_for_file(filepath):
-    """Legge un CSV e restituisce un DataFrame 2 righe x N livelli (AUC e ACC)."""
-    try:
-        df = pd.read_csv(filepath)
-    except Exception as e:
-        print(f"Errore lettura {filepath}: {e}")
-        return None
 
-    if 'typ' not in df.columns:
-        return None
+def _read_metrics_file(filepath):
+    df = pd.read_csv(filepath)
+    if not {"Levels", "AUC", "ACC"}.issubset(df.columns):
+        raise ValueError(f"File {filepath} must contain columns: Levels, AUC, ACC")
+    df = df.copy()
+    df["LevelNum"] = df["Levels"].str.replace("level_", "", regex=False).astype(int)
+    df.sort_values("LevelNum", inplace=True)
+    return df
 
-    # Ground Truth
-    y_true = (df['typ'] != 'real').astype(int)
-    
-    # Trova e ordina le colonne dei livelli (level_1, level_3...)
-    level_cols = [c for c in df.columns if c.startswith('level_')]
-    # Ordinamento numerico (per evitare che level_11 venga prima di level_3)
-    level_cols.sort(key=lambda x: int(x.split('_')[1]))
 
-    # Dizionario per i risultati
-    results = {'Metric': ['AUC', 'ACC']}
-    
-    # Liste per calcolare la media (AVG) alla fine
-    auc_avgs = []
-    acc_avgs = []
-
-    for lvl in level_cols:
-        y_score = df[lvl].values
-        col_vals = []
-
-        # 1. Calcolo AUC
-        try:
-            if np.all(np.isfinite(y_score)):
-                val_auc = metrics.roc_auc_score(y_true, y_score)
-            else:
-                val_auc = np.nan
-        except: val_auc = np.nan
-        
-        # 2. Calcolo ACC (con soglia 0.5)
-        try:
-            val_acc = metrics.balanced_accuracy_score(y_true, y_score > ACC_THRESHOLD)
-        except: val_acc = np.nan
-
-        # Aggiungi alla colonna corrente
-        results[lvl] = [val_auc, val_acc]
-        
-        if not np.isnan(val_auc): auc_avgs.append(val_auc)
-        if not np.isnan(val_acc): acc_avgs.append(val_acc)
-
-    # Crea DataFrame
-    res_df = pd.DataFrame(results)
-    
-    # Imposta la metrica come indice (per pulizia visiva)
-    res_df.set_index('Metric', inplace=True)
-    
-    return res_df
-
-def create_report():
-    files = glob.glob("test_results_*.csv")
-    files.sort() # Ordine alfabetico dei file
-    
+def build_metrics_summary_table(metrics_dir="metrics_results", output_xlsx="metrics_summary.xlsx"):
+    files = sorted(glob.glob(os.path.join(metrics_dir, "metrics_*.csv")))
     if not files:
-        print("Nessun file CSV trovato.")
+        print("Nessun file metrics_*.csv trovato.")
+        return None
+
+    #os.makedirs(os.path.dirname(output_xlsx), exist_ok=True)
+    with pd.ExcelWriter(output_xlsx, engine="openpyxl") as writer:
+        row_pointer = 0
+        for f in files:
+            df = _read_metrics_file(f)
+            level_labels = df["LevelNum"].apply(lambda n: f"level_{n}").tolist()
+            table = pd.DataFrame([df["AUC"].values, df["ACC"].values],
+                                 index=["AUC", "ACC"],
+                                 columns=level_labels)
+            table.index.name = "Metrics"
+
+            title = os.path.basename(f)
+            pd.DataFrame([title]).to_excel(writer, sheet_name="Results",
+                                           startrow=row_pointer, header=False, index=False)
+            row_pointer += 1
+            table.to_excel(writer, sheet_name="Results", startrow=row_pointer)
+            row_pointer += len(table.index) + 3
+
+    print(f"Report Excel salvato in: {output_xlsx}")
+    return output_xlsx
+
+
+def plot_metrics_curves(metrics_dir="metrics_results", output_dir=None):
+    files = sorted(glob.glob(os.path.join(metrics_dir, "metrics_*.csv")))
+    if not files:
+        print("Nessun file metrics_*.csv trovato.")
         return
 
-    print(f"Trovati {len(files)} file. Scrittura su Excel...")
+    if output_dir is None:
+        output_dir = os.path.join(metrics_dir, "plots")
+    os.makedirs(output_dir, exist_ok=True)
 
-    try:
-        with pd.ExcelWriter(OUTPUT_FILE, engine='openpyxl') as writer:
-            row_pointer = 0
-            
-            for f in files:
-                print(f"Processing: {f}")
-                
-                # Calcola la tabellina per questo file
-                df_res = compute_metrics_for_file(f)
-                
-                if df_res is not None:
-                    # 1. Scrivi il nome del file (come titolo)
-                    # Creiamo un piccolo dataframe solo per scrivere il titolo nella cella
-                    pd.DataFrame([f]).to_excel(writer, sheet_name='Results', 
-                                               startrow=row_pointer, header=False, index=False)
-                    row_pointer += 1
-                    
-                    # 2. Scrivi la tabella dei risultati sotto il titolo
-                    df_res.to_excel(writer, sheet_name='Results', 
-                                    startrow=row_pointer, float_format="%.4f")
-                    
-                    # 3. Aggiorna il puntatore per lasciare spazio (Tabella + Titolo + Spazio vuoto)
-                    # 2 righe di dati + 1 di header + 2 di spazio = 5 righe di offset
-                    row_pointer += 5 
-                    
-        print(f"\nFatto! File salvato come: {OUTPUT_FILE}")
-        
-    except Exception as e:
-        print(f"Errore salvataggio Excel: {e}")
+    for f in files:
+        df = _read_metrics_file(f)
+        title = os.path.splitext(os.path.basename(f))[0]
+
+        plt.figure(figsize=(8, 4.5))
+        plt.plot(df["LevelNum"], df["AUC"], marker="o", label="AUC")
+        plt.plot(df["LevelNum"], df["ACC"], marker="o", label="ACC")
+        plt.xlabel("Level")
+        plt.ylabel("Score")
+        plt.title(title)
+        plt.grid(True, alpha=0.3)
+        plt.legend()
+        plt.xticks(df["LevelNum"], [f"level_{n}" for n in df["LevelNum"]], rotation=45)
+        out_path = os.path.join(output_dir, f"{title}.png")
+        plt.tight_layout()
+        plt.savefig(out_path, dpi=150)
+        plt.close()
+        print(f"Plot salvato in: {out_path}")
+
+
+
+
 
 if __name__ == "__main__":
     import argparse
@@ -459,6 +441,9 @@ if __name__ == "__main__":
     parser.add_argument("--metrics", action='store_true', help="Flag to compute metrics after testing and save results")
     parser.add_argument("--cross_validate", action='store_true', help="Flag to cross validate on stable diffusion data during testing")
     parser.add_argument("--dataset", type=str, choices=["stylegan1", "stablediffusion"], default="stylegan1", help="Dataset to use for training/testing")
+    parser.add_argument("--report", action='store_true', help="Create a complete report of all experiments")
+    parser.add_argument("--graphs", action='store_true', help="Create all graphs")
+
 
     args= vars(parser.parse_args())
     dataset_name = args['dataset']
@@ -485,8 +470,6 @@ if __name__ == "__main__":
         test_classificators_in_dataset(cross_val, device, model_string, batch_size=args['batch_size'], test_dataset=args['dataset'])
 
     if args['metrics']:
-        from compute_metrics import compute_metrics, dict_metrics
-        
         string_cross_val = ""
         if dataset_name == "stylegan1":
             if not cross_val:
@@ -499,24 +482,25 @@ if __name__ == "__main__":
             else:
                 string_cross_val = "_Stable_Diffusion_vs_SG_data_"
         
-        csv_filename = f"test_results{string_cross_val}{model_string}.csv"
+        os.makedirs("metrics_results",exist_ok=True)
+        csv_filename = f"csv_results/test_results{string_cross_val}{model_string}.csv" 
 
         if os.path.exists(csv_filename):
             #print(f"Computing metrics {args['metrics']} on: {csv_filename}")
-            #tab_AUC = compute_metrics(csv_filename, csv_filename, dict_metrics['auc']).drop(columns=['AVG'])
-            #tab_ACC = compute_metrics(csv_filename, csv_filename, dict_metrics['acc']).drop(columns=['AVG'])
-            #tab_AUC.rename(columns={dataset_name: 'AUC'+string_cross_val}, inplace=True)
-            #tab_ACC.rename(columns={dataset_name: 'ACC'+string_cross_val}, inplace=True)
-            #result = pd.concat([tab_AUC, tab_ACC], axis=1)
-            #result.index.name = "Levels"
-            #print(result)
-            #result.to_excel(f"metrics_results.xlsx") 
-            #result.to_csv(f"metrics_results.csv")
-            #TODO: REVIEW THIS FUNCTION.
-            create_report()
+            tab_AUC = compute_metrics(csv_filename, csv_filename, dict_metrics['auc']).drop(columns=['AVG'])
+            tab_ACC = compute_metrics(csv_filename, csv_filename, dict_metrics['acc']).drop(columns=['AVG'])
+            tab_AUC.columns = ["AUC"]
+            tab_ACC.columns = ["ACC"]
+            result = pd.concat([tab_AUC, tab_ACC], axis=1)
+            result.index.name = "Levels"
+            result.to_csv(f"metrics_results/metrics_{string_cross_val}{model_string}.csv")
+            #create_report()
             print("Metrics report created.")
         else:
             print(f"File {csv_filename} not found. Cannot compute metrics.")
 
 
-
+    if args['report']:
+        build_metrics_summary_table()
+    if args['graphs']:
+        plot_metrics_curves(output_dir="result_images")
