@@ -34,9 +34,43 @@ dict_pretrain = {
     'clipB16laion2B'    : ('ViT-B-16', 'laion2b_s34b_b88k'),
 }
 
+# It takes the corners and four patch central
+def extract_corner_center_tokens(output,grid_size = 14):
+    #(batch_size, seq_len, dim)
+    batch_size = output.shape[0]
+    #dimention per patch
+    dim = output.shape[2]
+    patches = output[:, 1:, :].reshape(batch_size, grid_size, grid_size, dim)
+
+    top_left = patches[:, 0, 0, :]
+    top_right =patches [:, 0, -1, :]
+    bottom_left =patches [:,-1, 0, :]
+    bottom_right =patches [:,-1, -1, :]
+
+    center_start = grid_size // 2 -1 #14x14 => 7-1=6
+    center_end = grid_size // 2 + 1 #14x14 => 8
+
+    center_top_left = patches [:, center_start, center_start,:]
+    center_top_right = patches [:, center_start, center_end - 1,:]
+    center_bottom_left = patches [:, center_end -1, center_start,:]
+    center_bottom_right = patches [:, center_end -1, center_end - 1,:]
+    #stacks those vector in a unique tensor
+    selected_tokens = torch.stack([top_left, top_right, bottom_left, bottom_right,
+                               center_top_left, center_top_right, center_bottom_left, center_bottom_right],
+                              dim=1)
+    # Flatten to [batch_size, 8*dim]
+    #Here, it creates a struct with the batch size and then (8x1024 values)
+    return selected_tokens.reshape(batch_size, -1)
+    
+
+    
+    
+
 
 class OpenClipLinear(nn.Module):
-    def __init__(self, num_classes=1, pretrain='clipL14commonpool', normalize=True, next_to_last=False, layer_to_extract=None):
+    def __init__(self, num_classes=1, pretrain='clipL14commonpool', normalize=True, next_to_last=False,
+                  layer_to_extract=None, token_mode='cls'):
+        
         super(OpenClipLinear, self).__init__()
 
         # Load backbone or download all pretrained weights
@@ -56,14 +90,20 @@ class OpenClipLinear(nn.Module):
         # Put the backbone in a list  to not optimize its parameters
         self.bb = [backbone, ]
         self.normalize = normalize
+        self.token_mode = token_mode
 
         self.layers_to_extract = layer_to_extract
         self.intermediate_features = {}
 
         def get_activation(name):
             def hook(model,input,output):
-                #The output is [seq_len, batch, dim]
-                self.intermediate_features[name] = output[:,0,:].detach().cpu()
+                if self.token_mode == 'cls':
+                    #The output is [seq_len, batch, dim]
+                    self.intermediate_features[name] = output[:,0,:].detach().cpu()
+                elif self.token_mode == 'corners_centers':
+                    self.intermediate_features[name] = extract_corner_center_tokens(output, grid_size=14).detach().cpu()
+                else:
+                    raise ValueError(f"Unknown token_mode: {self.token_mode}")
             return hook
         
         if self.layers_to_extract is not None:
@@ -72,8 +112,14 @@ class OpenClipLinear(nn.Module):
                     # The register forward hook registers a "hook" to extract the output of the layer
                     self.bb[0].visual.transformer.resblocks[i].register_forward_hook(get_activation(f'block_{i}'))
         
+
+        if self.token_mode == 'cls':
+            input_dim = self.num_features
+        elif self.token_mode == 'corners_centers':
+            input_dim = 8 * self.num_features
+
         # Define the classification head, this is the piece to be trained
-        self.fc = ChannelLinear(self.num_features, num_classes)
+        self.fc = ChannelLinear(input_dim, num_classes)
         torch.nn.init.normal_(self.fc.weight.data, 0.0, 0.02)
 
     #To ensure that the backbone and all are also moved to the right device
