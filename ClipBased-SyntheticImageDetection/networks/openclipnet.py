@@ -44,7 +44,7 @@ def extract_corner_center_tokens(output,grid_size = 14):
     # Validate the sequence length
     expected_seq_len = 1 + grid_size * grid_size
     if seq_len != expected_seq_len:
-        print(f"Warning: expected seq_len={expected_seq_len}, got {seq_len}. Attempting to adjust grid_size.")
+        #print(f"Warning: expected seq_len={expected_seq_len}, got {seq_len}. Attempting to adjust grid_size.")
         # Auto-detect grid_size from seq_len
         grid_size = int((seq_len - 1) ** 0.5)
     
