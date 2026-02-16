@@ -38,28 +38,37 @@ dict_pretrain = {
 def extract_corner_center_tokens(output,grid_size = 14):
     #(batch_size, seq_len, dim)
     batch_size = output.shape[0]
-    #dimention per patch
+    seq_len = output.shape[1]
     dim = output.shape[2]
+    
+    # Validate the sequence length
+    expected_seq_len = 1 + grid_size * grid_size
+    if seq_len != expected_seq_len:
+        print(f"Warning: expected seq_len={expected_seq_len}, got {seq_len}. Attempting to adjust grid_size.")
+        # Auto-detect grid_size from seq_len
+        grid_size = int((seq_len - 1) ** 0.5)
+    
+    # Skip the CLS token (index 0), patches start from index 1
     patches = output[:, 1:, :].reshape(batch_size, grid_size, grid_size, dim)
-
+    
+    # Extract 4 corners
     top_left = patches[:, 0, 0, :]
-    top_right =patches [:, 0, -1, :]
-    bottom_left =patches [:,-1, 0, :]
-    bottom_right =patches [:,-1, -1, :]
-
-    center_start = grid_size // 2 -1 #14x14 => 7-1=6
-    center_end = grid_size // 2 + 1 #14x14 => 8
-
-    center_top_left = patches [:, center_start, center_start,:]
-    center_top_right = patches [:, center_start, center_end - 1,:]
-    center_bottom_left = patches [:, center_end -1, center_start,:]
-    center_bottom_right = patches [:, center_end -1, center_end - 1,:]
-    #stacks those vector in a unique tensor
+    top_right = patches[:, 0, -1, :]
+    bottom_left = patches[:, -1, 0, :]
+    bottom_right = patches[:, -1, -1, :]
+    
+    # Extract 4 center patches
+    center_start = grid_size // 2 - 1
+    center_end = grid_size // 2 + 1
+    
+    center_top_left = patches[:, center_start, center_start, :]
+    center_top_right = patches[:, center_start, center_end - 1, :]
+    center_bottom_left = patches[:, center_end - 1, center_start, :]
+    center_bottom_right = patches[:, center_end - 1, center_end - 1, :]
+    
     selected_tokens = torch.stack([top_left, top_right, bottom_left, bottom_right,
-                               center_top_left, center_top_right, center_bottom_left, center_bottom_right],
-                              dim=1)
-    # Flatten to [batch_size, 8*dim]
-    #Here, it creates a struct with the batch size and then (8x1024 values)
+                                   center_top_left, center_top_right, center_bottom_left, center_bottom_right],
+                                  dim=1)
     return selected_tokens.reshape(batch_size, -1)
     
 
