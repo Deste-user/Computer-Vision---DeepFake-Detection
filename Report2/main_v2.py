@@ -196,7 +196,7 @@ def train_classificators(model_string='mlp', device=None, num_epochs=10,batch_si
                     opt.step()
                     
 
-    print("\Saving models...")
+    print("Saving models...")
     for i, level_val in enumerate(levels):
         for j in range(8):
             filename = f"lvl_{level_val}_{patch_names[j]}.pt"
