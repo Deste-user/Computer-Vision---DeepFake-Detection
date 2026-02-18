@@ -1,3 +1,4 @@
+import gc
 import torch
 import torch.nn as nn
 import open_clip
@@ -39,6 +40,8 @@ class DataLoaderEmbeddings(torch.utils.data.Dataset):
         print(f"Loaded {len(self.embeddings)} embeddings.")
         print(f"Embedding shape: {self.embeddings[0].shape}")
         print(f"Loaded labels: {len(self.labels)}")
+        del raw_data
+        gc.collect()
     def __len__(self):
         return len(self.embeddings)
 
@@ -50,13 +53,17 @@ class DataLoaderEmbeddings(torch.utils.data.Dataset):
         return emb, self.labels[idx], self.image_names[idx]
 
 
-def get_separated_dataloaders(embeddings_base_path, batch_size=32,split='train_set'):    
+def get_separated_dataloaders(embeddings_base_path, batch_size=32,split='train_set', target_datasets=None):    
     loader = {}
 
     if not os.path.exists(embeddings_base_path):
         raise FileNotFoundError(f"Embeddings path '{embeddings_base_path}' does not exist.")
+    
     datasets_names=[d for d in os.listdir(embeddings_base_path) if os.path.isdir(os.path.join(embeddings_base_path,d))]
     print (datasets_names)
+    if target_datasets is not None:
+        target_fake = f"fake_{target_datasets}"
+        datasets_names = [d for d in datasets_names if d == "real" or d == target_fake]
 
     for name  in datasets_names:
         pt_path=os.path.join(embeddings_base_path,name,split,"embeddings.pt")
@@ -64,9 +71,8 @@ def get_separated_dataloaders(embeddings_base_path, batch_size=32,split='train_s
            ds = DataLoaderEmbeddings(pt_path)
            is_train = (split=='train_set')
 
-           dl = torch.utils.data.DataLoader(ds, batch_size=batch_size, shuffle=is_train, num_workers=4,pin_memory=True)
+           dl = torch.utils.data.DataLoader(ds, batch_size=batch_size, shuffle=is_train, num_workers=0,pin_memory=True)
            loader[name] = dl
-
     return loader    
 
 
@@ -145,215 +151,125 @@ def train_classificators(model_string='mlp', device=None, num_epochs=10,batch_si
         print("Using CPU for training.\n", flush=True)
         device = torch.device("cpu")
 
-    if not os.path.exists(f"classificators/{model_string}/{train_dataset}"):
-        os.makedirs(f"classificators/{model_string}/{train_dataset}")
+    save_dir = f"classificators_v2/{train_dataset}"
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
 
-    train_loader = get_separated_dataloaders("dataset_embeddings_v2", batch_size=batch_size, split='train_set')
-    val_loader = get_separated_dataloaders("dataset_embeddings_v2", batch_size=batch_size, split='val_set')
-    ds = torch.utils.data.ConcatDataset([train_loader['real'].dataset, train_loader[f'fake_{train_dataset}'].dataset])
-    ds_val = torch.utils.data.ConcatDataset([val_loader['real'].dataset, val_loader[f'fake_{train_dataset}'].dataset])
+    train_loader = get_separated_dataloaders("dataset_embeddings_v2", batch_size=batch_size, split='train_set',target_datasets=train_dataset)
+    val_loader = get_separated_dataloaders("dataset_embeddings_v2", batch_size=batch_size, split='val_set', target_datasets=train_dataset)
+    full_dataset = torch.utils.data.ConcatDataset([train_loader['real'].dataset, train_loader[f'fake_{train_dataset}'].dataset, val_loader['real'].dataset, val_loader[f'fake_{train_dataset}'].dataset])
     BATCH_SIZE = batch_size
     
-    data_train = torch.utils.data.DataLoader(ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
-    data_val = torch.utils.data.DataLoader(ds_val, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
+    dl_full = torch.utils.data.DataLoader(full_dataset, batch_size=BATCH_SIZE, num_workers=0, shuffle=True, pin_memory=True)
     print (f"Training classificators on dataset '{train_dataset}'")
-    print ("Training classificators on dataset with", len(data_train.dataset), "samples.")
+    print ("Training classificators on dataset with", len(full_dataset), "samples.")
 
-    arrays_classificators = []
-    input_dim = ds[0][0].shape[-1]
-    N_LEVELS = len(levels)
-    for level_idx in range(N_LEVELS):
-        print(f"Training classificator for level {levels[level_idx]}\n")
-        if model_string == "mlp":
-            classificator = nn.Sequential(
-                nn.Linear(input_dim, 256),
-                nn.ReLU(),
-                nn.Linear(256, 2)
-            ).to(device)
-            # In this Loss is already included Softmax.
-            criterion = nn.CrossEntropyLoss()
-            optimizer = torch.optim.AdamW(classificator.parameters(), lr=0.001)
+    models = [[nn.Linear(1024, 2).to(device) for _ in range(8)] for _ in range(len(levels))]
+    optimizers = [[torch.optim.Adam(models[i][j].parameters(), lr=0.001, weight_decay=1e-4) for j in range(8)] for i in range(len(levels))]
+    criterion = nn.CrossEntropyLoss()
 
-            # Early stopping parameters
-            best_val_loss = float('inf')
-            patience = 3  # Numero di epoch senza miglioramento prima di fermarsi
-            patience_counter = 0
-            best_model_state = None
+    patch_names = [
+        "Corner_TL", "Corner_TR", "Corner_BL", "Corner_BR", 
+        "Center_TL", "Center_TR", "Center_BL", "Center_BR"
+    ]
 
-            for epoch in range(num_epochs):
-                classificator.train()
-                running_loss = 0.0
-                for embeddings, labels, _ in tqdm(data_train, desc=f"Epoch {epoch+1}/{num_epochs}", leave=False):
-                    embeddings_level = embeddings[:, level_idx, :].to(device)
-                    labels = labels.to(device)
-
-                    optimizer.zero_grad()
-
-                    #Forward pass
-                    outputs = classificator(embeddings_level)
-
-                    #Criterio di loss
+    for epoch in range(num_epochs):
+        for embs, labels, _ in tqdm(dl_full, desc=f"Epoch {epoch+1}/{num_epochs}"):
+            embs = embs.to(device)    # Shape: [Batch, 6, 8, 1024]
+            labels = labels.to(device) # Shape: [Batch]
+            
+            # Per ogni batch, aggiorniamo tutti e 48 i modelli
+            for i, level_val in enumerate(levels):
+                for j in range(8):
+                    model = models[i][j]
+                    opt = optimizers[i][j]
+                    
+                    # Estraiamo la fetta di tensore corretta
+                    inputs = embs[:, i, j, :]
+                    
+                    # Forward + Backward
+                    outputs = model(inputs)
                     loss = criterion(outputs, labels)
                     
-                    #avg gradients
+                    opt.zero_grad()
                     loss.backward()
+                    opt.step()
+                    
 
-                    # Update weights
-                    optimizer.step()
-
-                    running_loss += loss.item() * embeddings.size(0)
-
-                epoch_loss = running_loss / len(data_train.dataset)
-
-                # Validation
-                classificator.eval()
-                val_loss = 0.0
-                with torch.no_grad():
-                    for embeddings, labels, _ in data_val:
-                        embeddings_level = embeddings[:, level_idx, :].to(device)
-                        labels = labels.to(device)
-                        outputs = classificator(embeddings_level)
-                        loss = criterion(outputs, labels)
-                        val_loss += loss.item() * embeddings.size(0)
-                val_loss /= len(data_val.dataset)
-                print(f"\nEpoch {epoch+1}/{num_epochs}, Loss : {epoch_loss:.4f}, Val Loss : {val_loss:.4f}\n")
-
-                if val_loss < best_val_loss:
-                    best_val_loss = val_loss
-                    patience_counter = 0
-                    best_model_state = copy.deepcopy(classificator.state_dict())
-                    print("  Saving best model...\n", flush=True)
-                else:
-                    patience_counter += 1
-                    if patience_counter >= patience:
-                        print("Early stopping triggered.\n", flush=True)
-                        break
-            if best_model_state is not None:        
-                classificator.load_state_dict(best_model_state)            
-            torch.save(classificator.state_dict(), f'classificators/{model_string}/{train_dataset}/classificator_level_{levels[level_idx]}.pt')
-        elif model_string == "svm":
-            from sklearn.svm import LinearSVC
-            from sklearn.calibration import CalibratedClassifierCV    
-
-            all_embeddings = []
-            all_labels = []
-            for embeddings, labels, _ in tqdm(data_train):
-                all_embeddings.append(embeddings[:, level_idx, :].cpu().numpy())
-                all_labels.append(labels.cpu().numpy())
-            
-            X = np.concatenate(all_embeddings, axis=0)
-            y = np.concatenate(all_labels, axis=0)
-
-            print(f"Training LinearSVC on {X.shape[0]} samples...", flush=True)
-            
-            classificator = SGDClassifier(loss='hinge', max_iter=1000, tol=1e-3)
-            classificator = CalibratedClassifierCV(classificator, cv=3)
-            classificator.fit(X, y)
-            joblib.dump(classificator, f'classificators/{model_string}/{train_dataset}/classificator_level_{levels[level_idx]}.pkl')
-            print(f"Saved!", flush=True)
+    print("\Saving models...")
+    for i, level_val in enumerate(levels):
+        for j in range(8):
+            filename = f"lvl_{level_val}_{patch_names[j]}.pt"
+            torch.save(models[i][j].state_dict(), os.path.join(save_dir, filename))
+        
 
 
 def test_classificators_in_dataset(cross_validate, device=None, model_string="mlp",batch_size=64, test_dataset="stylegan1"):    
-    if torch.cuda.is_available():
-        device = torch.device("cuda")
-        print("Using GPU for testing.")
-    else:
-        device = torch.device("cpu")    
+    print(f"--- AVVIO TEST: Patch-wise con nn.Linear ---")
     
-    #Load classificators
-    arrays_classificators = []
     test_loader = get_separated_dataloaders("dataset_embeddings_v2", batch_size=batch_size, split='test_set')
-    input_dim = test_loader['real'].dataset[0][0].shape[-1]
-    for level in levels:
-        if model_string == "mlp":
-            classificator = nn.Sequential(
-                nn.Linear(input_dim, 256),
-                nn.ReLU(),
-                nn.Linear(256, 2)
-            ).to(device)
-            classificator.load_state_dict(torch.load(f'classificators/{model_string}/{test_dataset}/classificator_level_{level}.pt'))
-            classificator.eval()
-        elif model_string == "svm":
-            classificator = joblib.load(f'classificators/{model_string}/{test_dataset}/classificator_level_{level}.pkl')
-        
-
-        arrays_classificators.append(classificator)
-
-
-   ## Testing the classificator on the test set.
     ds_test_real = test_loader['real']
-    string_cross_val = None
-    label = None
-
-    if test_dataset == "stylegan1":
-        if cross_validate is not True:
-            ds_test_fake = test_loader[f'fake_{test_dataset}']
-            string_cross_val="_StyleGAN1_data_"
-            label = "stylegan1"    
-        else:
-            ds_test_fake = test_loader['fake_stablediffusion']
-            string_cross_val="_SG_vs_Stable_Diffusion_data_"
-            label = "stablediffusion"    
-    elif test_dataset == "stablediffusion":
-        if cross_validate is not True:
-            ds_test_fake = test_loader[f'fake_{test_dataset}']
-            string_cross_val="_Stable_Diffusion_data_"
-            label = "stablediffusion"
-        else:
-            ds_test_fake = test_loader['fake_stylegan1']
-            string_cross_val="_Stable_Diffusion_vs_SG_data_"
-            label = "stylegan1"
-    else:
-        print("Test dataset not recognized.")
-        return        
-
-    print (f"Testing classificators on dataset '{test_dataset}' with cross validation = {cross_validate}")
-   
-
-    ds_test = torch.utils.data.ConcatDataset([ds_test_real.dataset, ds_test_fake.dataset])
-    data_test = torch.utils.data.DataLoader(ds_test, batch_size=batch_size, shuffle=False, num_workers=0)
-
-    all_labels = []
-    all_filenames = []
-    all_types = []
-    all_outputs = [[] for _ in levels]
-
-    with torch.no_grad():
-        for embeddings, labels, filename in tqdm(data_test):
-            all_labels.append(labels.cpu())
-            all_filenames.extend(filename)
-
-            types = ['real' if l == 0 else label for l in labels.cpu().numpy()]    
-            all_types.extend(types)
-
-            for level_idx, classificator in enumerate(arrays_classificators):
-                embeddings_level = embeddings[:, level_idx, :]
-
-                if model_string == "mlp":
-                    embeddings_level = embeddings_level.to(device)
-                    outputs = classificator(embeddings_level)
-                    probs = torch.softmax(outputs, dim=1)[:, 1]  
-                    all_outputs[level_idx].append(probs.cpu())
-                elif model_string == "svm":
-                    probs = classificator.predict_proba(embeddings_level.cpu().numpy())[:, 1] 
-                    all_outputs[level_idx].append(torch.tensor(probs))
-
-
-
-
-    all_labels = torch.cat(all_labels).numpy()
-    for level_idx in range(len(levels)):
-        all_outputs[level_idx] = torch.cat(all_outputs[level_idx]).numpy()
-
     
-    results = {'filename': all_filenames, 'typ': all_types}
-    for level_idx, level in enumerate(levels):
-        results[f'level_{level}'] = all_outputs[level_idx]
+    if test_dataset == "stylegan1":
+        target_name = "fake_stablediffusion" 
+    elif test_dataset == "stablediffusion":
+        target_name = "fake_stylegan1" 
+        
+    ds_test_fake = test_loader[target_name]
+    ds_test = torch.utils.data.ConcatDataset([ds_test_real.dataset, ds_test_fake.dataset])
+    
+    print("Loading Test Set...")
+    dl_full = torch.utils.data.DataLoader(ds_test, batch_size=batch_size, num_workers=4)
+    
+    all_embeddings = []
+    all_labels = []
+    for embs, lbls, _ in tqdm(dl_full, desc="Loading Test Data"):
+        all_embeddings.append(embs)
+        all_labels.append(lbls)
+        
+    full_X = torch.cat(all_embeddings, dim=0) # [N, Levels, Patches, 1024]
+    full_y = torch.cat(all_labels, dim=0)     # [N]
+    
+    # 3. Setup Matrice Risultati
+    patch_names = ["Corner_TL", "Corner_TR", "Corner_BL", "Corner_BR", 
+                   "Center_TL", "Center_TR", "Center_BL", "Center_BR"]
+    
+    
+    train_source = test_dataset
+    
+    model_dir = f"classificators/{test_dataset}"
+    print(f"Loading models from: {model_dir}")
 
-    df = pd.DataFrame(results)
-    os.makedirs("csv_results",exist_ok=True)
-    df.to_csv("csv_results/test_results"+string_cross_val+model_string+".csv", index=False)
-    print("Test results saved to test_results"+string_cross_val+model_string+".csv")
+    for i, level_val in enumerate(tqdm(levels, desc="Evaluating")):
+        for patch_idx in range(8):
+            patch_name = patch_names[patch_idx]
+            
+            model_path = os.path.join(model_dir, f"lvl_{level_val}_{patch_name}.pt")
+            if not os.path.exists(model_path):
+                continue
+            
+            model = nn.Linear(1024, 2).to(device)
+            model.load_state_dict(torch.load(model_path, map_location=device))
+            model.eval()
+            
+            inputs = full_X[:, i, patch_idx, :].to(device)
+            targets = full_y.numpy() # Sklearn vuole numpy per le metriche
+            
+            with torch.no_grad():
+                outputs = model(inputs)
+                # Softmax per avere probabilità tra 0 e 1
+                probs = torch.softmax(outputs, dim=1)[:, 1].cpu().numpy()
+
+            # Salva risultati in CSV
+            results_df = pd.DataFrame({                
+                "Level": [level_val] * len(probs),
+                "Patch": [patch_name] * len(probs),
+                "Probs": probs,
+                "Labels": targets
+            })
+            output_file = os.path.join(model_dir, f"results_{level_val}_{patch_name}.csv")
+            results_df.to_csv(output_file, index=False)
+            
 
 
 def _read_metrics_file(filepath):
