@@ -177,6 +177,8 @@ def train_classificators(model_string='mlp', device=None, num_epochs=10,batch_si
         for embs, labels, _ in tqdm(dl_full, desc=f"Epoch {epoch+1}/{num_epochs}"):
             embs = embs.to(device)    # Shape: [Batch, 6, 8, 1024]
             labels = labels.to(device) # Shape: [Batch]
+            if len(embs.shape) == 3 and embs.shape[-1] == 8192:
+                embs = embs.view(embs.size(0), len(levels), 8, 1024)
             
             # Per ogni batch, aggiorniamo tutti e 48 i modelli
             for i, level_val in enumerate(levels):
