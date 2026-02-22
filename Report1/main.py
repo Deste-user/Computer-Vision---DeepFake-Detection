@@ -24,7 +24,8 @@ OUTPUT_FILE = "report_result.xlsx"
 ACC_THRESHOLD = 0.5
 
 script_dir = os.path.dirname(os.path.abspath(__file__))
-repo_path = os.path.join(script_dir, 'ClipBased-SyntheticImageDetection')
+parent_dir = os.path.dirname(script_dir)
+repo_path = os.path.join(parent_dir, 'ClipBased-SyntheticImageDetection')
 sys.path.append(repo_path)
 from networks import openclipnet
 from compute_metrics import compute_metrics, dict_metrics
@@ -253,6 +254,63 @@ def train_classificators(model_string='mlp', device=None, num_epochs=10,batch_si
             classificator.fit(X, y)
             joblib.dump(classificator, f'classificators/{model_string}/{train_dataset}/classificator_level_{levels[level_idx]}.pkl')
             print(f"Saved!", flush=True)
+        elif model_string == 'linear':
+            classificator = nn.Linear(input_dim, 2).to(device)
+            criterion = nn.CrossEntropyLoss()
+            optimizer = torch.optim.AdamW(classificator.parameters(), lr=0.001)
+
+            # Early stopping parameters
+            best_val_loss = float('inf')
+            patience = 3
+            patience_counter = 0
+            best_model_state = None
+
+            for epoch in range(num_epochs):
+                classificator.train()
+                running_loss = 0.0
+                for embeddings, labels, _ in tqdm(data_train, desc=f"Epoch {epoch+1}/{num_epochs}", leave=False):
+                    embeddings_level = embeddings[:, level_idx, :].to(device)
+                    labels = labels.to(device)
+
+                    optimizer.zero_grad()
+                    outputs = classificator(embeddings_level)
+                    loss = criterion(outputs, labels)
+                    loss.backward()
+                    optimizer.step()
+                    running_loss += loss.item() * embeddings.size(0)
+
+                epoch_loss = running_loss / len(data_train.dataset)
+
+                # Validation
+                classificator.eval()
+                val_loss = 0.0
+                with torch.no_grad():
+                    for embeddings, labels, _ in data_val:
+                        embeddings_level = embeddings[:, level_idx, :].to(device)
+                        labels = labels.to(device)
+                        outputs = classificator(embeddings_level)
+                        loss = criterion(outputs, labels)
+                        val_loss += loss.item() * embeddings.size(0)
+                val_loss /= len(data_val.dataset)
+                print(f"\nEpoch {epoch+1}/{num_epochs}, Loss : {epoch_loss:.4f}, Val Loss : {val_loss:.4f}\n")
+
+                if val_loss < best_val_loss:
+                    best_val_loss = val_loss
+                    patience_counter = 0
+                    best_model_state = copy.deepcopy(classificator.state_dict())
+                    print("  Saving best model...\n", flush=True)
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        print("Early stopping triggered.\n", flush=True)
+                        break
+            if best_model_state is not None:
+                classificator.load_state_dict(best_model_state)
+            torch.save(classificator.state_dict(), f'classificators/{model_string}/{train_dataset}/classificator_level_{levels[level_idx]}.pt')
+                 
+
+
+
 
 
 def test_classificators_in_dataset(cross_validate, device=None, model_string="mlp",batch_size=64, test_dataset="stylegan1"):    
@@ -275,10 +333,13 @@ def test_classificators_in_dataset(cross_validate, device=None, model_string="ml
             ).to(device)
             classificator.load_state_dict(torch.load(f'classificators/{model_string}/{test_dataset}/classificator_level_{level}.pt'))
             classificator.eval()
+        elif model_string == "linear":
+            classificator = nn.Linear(input_dim, 2).to(device)
+            classificator.load_state_dict(torch.load(f'classificators/{model_string}/{test_dataset}/classificator_level_{level}.pt'))
+            classificator.eval()
         elif model_string == "svm":
             classificator = joblib.load(f'classificators/{model_string}/{test_dataset}/classificator_level_{level}.pkl')
         
-
         arrays_classificators.append(classificator)
 
 
@@ -331,7 +392,7 @@ def test_classificators_in_dataset(cross_validate, device=None, model_string="ml
             for level_idx, classificator in enumerate(arrays_classificators):
                 embeddings_level = embeddings[:, level_idx, :]
 
-                if model_string == "mlp":
+                if model_string == "mlp" or model_string == "linear":
                     embeddings_level = embeddings_level.to(device)
                     outputs = classificator(embeddings_level)
                     probs = torch.softmax(outputs, dim=1)[:, 1]  
@@ -340,22 +401,31 @@ def test_classificators_in_dataset(cross_validate, device=None, model_string="ml
                     probs = classificator.predict_proba(embeddings_level.cpu().numpy())[:, 1] 
                     all_outputs[level_idx].append(torch.tensor(probs))
 
-
-
-
     all_labels = torch.cat(all_labels).numpy()
     for level_idx in range(len(levels)):
         all_outputs[level_idx] = torch.cat(all_outputs[level_idx]).numpy()
 
-    
-    results = {'filename': all_filenames, 'typ': all_types}
-    for level_idx, level in enumerate(levels):
-        results[f'level_{level}'] = all_outputs[level_idx]
+    if model_string == "linear":
+        # Calcola accuracy per ogni livello e salva
+        accuracy_results = []
+        for level_idx, level in enumerate(levels):
+            preds = all_outputs[level_idx] > 0.5
+            acc = sk_metrics.accuracy_score(all_labels, preds)
+            accuracy_results.append({'level': level, 'accuracy': acc})
+        
+        df_acc = pd.DataFrame(accuracy_results)
+        os.makedirs("csv_results", exist_ok=True)
+        df_acc.to_csv(f"csv_results/accuracy_{string_cross_val}{model_string}.csv", index=False)
+        print(f"Accuracy results saved to accuracy_{string_cross_val}{model_string}.csv")
+    else:
+        results = {'filename': all_filenames, 'typ': all_types}
+        for level_idx, level in enumerate(levels):
+            results[f'level_{level}'] = all_outputs[level_idx]
 
-    df = pd.DataFrame(results)
-    os.makedirs("csv_results",exist_ok=True)
-    df.to_csv("csv_results/test_results"+string_cross_val+model_string+".csv", index=False)
-    print("Test results saved to test_results"+string_cross_val+model_string+".csv")
+        df = pd.DataFrame(results)
+        os.makedirs("csv_results", exist_ok=True)
+        df.to_csv("csv_results/test_results"+string_cross_val+model_string+".csv", index=False)
+        print("Test results saved to test_results"+string_cross_val+model_string+".csv")
 
 
 def _read_metrics_file(filepath):
@@ -434,7 +504,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for data loading")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use for computation")
-    parser.add_argument("--classificator_model",type=str, choices=["mlp","svm"], default="mlp", help="Type of classificator model to use")
+    parser.add_argument("--classificator_model",type=str, choices=["mlp","svm","linear"], default="mlp", help="Type of classificator model to use")
     parser.add_argument("--create_embeddings", action='store_true', help="Flag to create embeddings")
     parser.add_argument("--mode", type=str, choices=["train", "test"], help="Mode: train or test the classificator")
     parser.add_argument("--num_epochs", type=int, default=10, help="Number of epochs for training")

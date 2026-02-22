@@ -1,4 +1,10 @@
-dataset_embeddings/
-.dataset_embeddings/*
+Repor1/dataset_embeddings/
+.Report1/dataset_embeddings/*
+#Think about it.
+Report2/classificators_v1/*
+
 .Report2/dataset_embeddings_v2/*
 Report2/dataset_embeddings_v2/*
+#Think about it.
+Report2/classificators_v2/*
+*.pt
