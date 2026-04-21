@@ -297,6 +297,7 @@ def test(cross_validate=False, device=None, model_string="mlp", batch_size=64, t
     data_test = torch.utils.data.DataLoader(ds_test, batch_size=batch_size, shuffle=False)
     
     input_dim = test_loader['real'].dataset[0][0].shape[-1]
+    sample_embedding = test_loader['real'].dataset[0][0]
     num_patches = sample_embedding.numel() // (len(levels) * input_dim)
     patch_names = ["CLS"] if num_patches == 1 else ["Corner_TL", "Corner_TR", "Corner_BL", "Corner_BR", "Center_TL", "Center_TR", "Center_BL", "Center_BR"]
     load_dir = f"classificators_{version}/{model_string}/{test_dataset}"
@@ -367,6 +368,8 @@ if __name__ == "__main__":
     parser.add_argument("--mode", type=str, choices=["train", "test"])
     parser.add_argument("--num_epochs", type=int, default=10)
     parser.add_argument("--dataset", type=str, choices=["stylegan1", "stablediffusion"], default="stylegan1")
+    parser.add_argument("--cross_validate", action='store_true', help="Enable cross validation on testing")
+    parser.add_argument("--number of levels", type=int, default=12, help="Number of levels to extract (max 12 for V1)")
     
     # Argomenti esclusivi V1
     parser.add_argument("--classificator_model", type=str, choices=["mlp","svm","linear"], default="linear", help="(V1 Only) Model type")
@@ -383,13 +386,6 @@ if __name__ == "__main__":
         sys.exit(0)
 
     if args['mode'] == "train":
-        if version == "v1":
-            train_v1(model_string=args['classificator_model'], device=device, num_epochs=args['num_epochs'], batch_size=args['batch_size'], train_dataset=args['dataset'])
-        else:
-            train_v2(device=device, num_epochs=args['num_epochs'], batch_size=args['batch_size'], train_dataset=args['dataset'], version=version)
-            
+        train(model_string=args['classificator_model'], device=device, num_epochs=args['num_epochs'], batch_size=args['batch_size'], train_dataset=args['dataset'], version=version, levels=LEVELS_V1 if version == "v1" else LEVELS_V2)
     elif args['mode'] == "test":
-        if version == "v1":
-            test_v1(cross_validate=args['cross_validate'], device=device, model_string=args['classificator_model'], batch_size=args['batch_size'], test_dataset=args['dataset'])
-        else:
-            test_v2(device=device, batch_size=args['batch_size'], test_dataset=args['dataset'], version=version)
+        test(cross_validate=args['cross_validate'], device=device, model_string=args['classificator_model'], batch_size=args['batch_size'], test_dataset=args['dataset'], version=version, levels=LEVELS_V1 if version == "v1" else LEVELS_V2)
