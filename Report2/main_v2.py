@@ -114,28 +114,42 @@ def create_dataset_embeddings(img_dir, model, label, device='cpu'):
             model.intermediate_features = {}
     return tensors
 
+struct_sets_versions = {
+    "v2": {
+        "fake_stylegan": fake_data_StyleGAN1_path,
+        "fake_stablediffusion": fake_data_StableDiffusion_path
+    },
+    # Change the path.
+    "v3": {
+        "fake_stylegan": fake_data_StyleGAN1_path,
+        "fake_stablediffusion": fake_data_StableDiffusion_path
+    }
+}
 
-def create_embeddings():
-    if not os.path.exists("dataset_embeddings_v2"):
+# Modify this function to create embeddings with different dataset and save them in different folders.
+def create_embeddings(version="v2"):
+    if not os.path.exists(f"dataset_embeddings_{version}"):
         #Install default the clip version 14 ViT-g-14
         model = openclipnet.OpenClipLinear(layer_to_extract=levels,token_mode='corners_centers')
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Using device: {device}")
+        #This remain the same.
+        real_imgs_db=os.listdir(real_data_FFHQ_path)
 
-        real_imgs_db=os.listdir(real_data_FFHQ_path)    
-        fake_imgs_db_stylegan1=os.listdir(fake_data_StyleGAN1_path)
-        fake_imgs_db_stablediffusion=os.listdir(fake_data_StableDiffusion_path)
+        #Dynamically     
+        fake_imgs_db_stylegan1=os.listdir(struct_sets_versions[version]["fake_stylegan"])
+        fake_imgs_db_stablediffusion=os.listdir(struct_sets_versions[version]["fake_stablediffusion"])
 
         classes = { "real": (real_data_FFHQ_path, 0),
-            "fake_stylegan1": (fake_data_StyleGAN1_path, 1),
-            "fake_stablediffusion": (fake_data_StableDiffusion_path, 1)}
+            "fake_stylegan1": (struct_sets_versions[version]["fake_stylegan"], 1),
+            "fake_stablediffusion": (struct_sets_versions[version]["fake_stablediffusion"], 1)}
         
         splits = ['train_set', 'val_set', 'test_set']
 
         for cls, (base_path, label) in tqdm(classes.items()):
             for split in splits:
                 img_dir = os.path.join(base_path, split)
-                out_dir = os.path.join("dataset_embeddings_v2", cls, split)
+                out_dir = os.path.join(f"dataset_embeddings_{version}", cls, split)
                 os.makedirs(out_dir, exist_ok=True)
 
                 data = create_dataset_embeddings(img_dir, model, label, device=device)
@@ -477,10 +491,7 @@ def plot_acc_results(output_dir='result_images', dataset_name="stylegan1"):
     output_file =os.path.join(output_dir,f"ACC_result_{dataset_name}.png")    
     plt.savefig(output_file,dpi=150)    
 
-               
-
-
-        
+            
 
 
 
@@ -490,7 +501,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size for data loading")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu", help="Device to use for computation")
-    parser.add_argument("--create_embeddings", action='store_true', help="Flag to create embeddings")
+    parser.add_argument("--create_embeddings",choices=["v2", "v3"], default="v2", help="Version of embeddings to create")
     parser.add_argument("--mode", type=str, choices=["train", "test"], help="Mode: train or test the classificator")
     parser.add_argument("--num_epochs", type=int, default=10, help="Number of epochs for training")
     parser.add_argument("--dataset", type=str, choices=["stylegan1", "stablediffusion"], default="stylegan1", help="Dataset to use for training/testing")
@@ -503,7 +514,7 @@ if __name__ == "__main__":
     device = torch.device(args['device'])
 
     if args['create_embeddings']:
-        create_embeddings()
+        create_embeddings(version=args['create_embeddings'])
         print("Embeddings created. Exiting.")
         sys.exit(0)
 
