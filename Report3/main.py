@@ -28,20 +28,28 @@ LEVELS_V2 = [3,7,11,15,19,23]
 real_data_FFHQ_path = "/oblivion/Datasets/FFHQ/images1024x1024"
 fake_data_StyleGAN1_path = "/oblivion/Datasets/FFHQ/generated/stylegan1-psi-0.5/images1024x1024"
 fake_data_StableDiffusion_path = "/oblivion/Datasets/FFHQ/generated/sdv1_4/images1024x1024"
+fake_data_SG3_path = "/oblivion/Datasets/FFHQ/generated/stylegan3-psi-0.5/images1024x1024"
+fake_data_SGXL_path = "/oblivion/Datasets/FFHQ/generated/styleganxl-psi-0.5/images1024x1024"
 ACC_THRESHOLD = 0.5
 
 struct_sets_versions = {
     "v1": { 
-        "fake_stylegan1": fake_data_StyleGAN1_path,
-        "fake_stablediffusion": fake_data_StableDiffusion_path
+        "fake_1": fake_data_StyleGAN1_path,
+        "fake_2": fake_data_StableDiffusion_path,
+        "names": {"fake_1": "StyleGAN 1", "fake_2": "Stable Diffusion v1.4"},
+        "patch_attention": ["CLS"]
     },
     "v2": {
-        "fake_stylegan1": fake_data_StyleGAN1_path,
-        "fake_stablediffusion": fake_data_StableDiffusion_path
+        "fake_1": fake_data_StyleGAN1_path,
+        "fake_2": fake_data_StableDiffusion_path,
+        "names": {"fake_1": "StyleGAN 1", "fake_2": "Stable Diffusion v1.4"},
+        "patch_attention": ["Corner_TL", "Corner_TR", "Corner_BL", "Corner_BR", "Center_TL", "Center_TR", "Center_BL", "Center_BR"]
     },
-    "v3": { # Aggiungi i percorsi modificati per V3 se necessario
-        "fake_stylegan1": fake_data_StyleGAN1_path,
-        "fake_stablediffusion": fake_data_StableDiffusion_path
+    "v3": { 
+        "fake_1": fake_data_SG3_path,
+        "fake_2": fake_data_SGXL_path,
+        "names": {"fake_1": "StyleGAN 3", "fake_2": "StyleGAN XL"},
+        "patch_attention": ["Corner_TL","Corner_TR"]
     }
 }
 
@@ -85,12 +93,12 @@ def create_dataset_embeddings(img_dir, model, label, device='cpu'):
     return tensors
 
 
-# For each dataset (real, fake_stylegan1, fake_stablediffusion) and for each split (train_set, val_set, test_set), this function creates embeddings using the OpenCLIP model and saves them as .pt files in a structured directory format.
+# For each dataset and for each split (train_set, val_set, test_set), this function creates embeddings using the OpenCLIP model and saves them as .pt files in a structured directory format.
 def create_embeddings(version="v1"):
     emb_folder = f"dataset_embeddings_{version}"
     if not os.path.exists(emb_folder):
         levels_to_extract = LEVELS_V1 if version == "v1" else LEVELS_V2
-        token_mode = 'default' if version == "v1" else 'corners_centers'
+        token_mode = 'cls' if version == "v1" else 'corners_centers'
         
         model = openclipnet.OpenClipLinear(layer_to_extract=levels_to_extract, token_mode=token_mode)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -98,8 +106,8 @@ def create_embeddings(version="v1"):
 
         classes = { 
             "real": (real_data_FFHQ_path, 0),
-            "fake_stylegan1": (struct_sets_versions[version]["fake_stylegan1"], 1),
-            "fake_stablediffusion": (struct_sets_versions[version]["fake_stablediffusion"], 1)
+            "fake_1": (struct_sets_versions[version]["fake_1"], 1),
+            "fake_2": (struct_sets_versions[version]["fake_2"], 1)
         }
         
         splits = ['train_set', 'val_set', 'test_set']
@@ -158,9 +166,9 @@ def get_separated_dataloaders(embeddings_base_path, batch_size=32, split='train_
 
 
 
-# ==========================================
-#    EXPERIMENT V1 (Global Token / CLS)
-# ==========================================
+# =============================================
+# EXPERIMENT TRAIN/EVAL/TEST (Global Token/CLS)
+# =============================================
 
 
 
@@ -192,28 +200,28 @@ def validation_all_patches(models, data_val, level_idx, num_levels, num_patches,
 
 
 # This function trains a classificator for each specified level in LEVELS_V1
-def train(model_string='mlp', device=None, num_epochs=10, batch_size=32, train_dataset="stylegan1", version="v1", levels=LEVELS_V1):
-    version_patch ="CLS" if version == "v1" else "eight_patches"
-    save_dir = f"classificators/{model_string}/{train_dataset}"
+def train(model_string='mlp', device=None, num_epochs=10, batch_size=32, train_dataset="fake_1", version="v1", levels=LEVELS_V1):
+    save_dir = f"classificators_{version}/{model_string}/{train_dataset}"
     os.makedirs(save_dir, exist_ok=True)
     
     train_loader = get_separated_dataloaders(f"dataset_embeddings_{version}", batch_size=batch_size, split='train_set')
     val_loader = get_separated_dataloaders(f"dataset_embeddings_{version}", batch_size=batch_size, split='val_set')
-    ds_train = torch.utils.data.ConcatDataset([train_loader['real'].dataset, train_loader[f'fake_{train_dataset}'].dataset])
-    ds_val = torch.utils.data.ConcatDataset([val_loader['real'].dataset, val_loader[f'fake_{train_dataset}'].dataset])
+    ds_train = torch.utils.data.ConcatDataset([train_loader['real'].dataset, train_loader[train_dataset].dataset])
+    ds_val = torch.utils.data.ConcatDataset([val_loader['real'].dataset, val_loader[train_dataset].dataset])
     
     data_train = torch.utils.data.DataLoader(ds_train, batch_size=batch_size, shuffle=True, num_workers=2)
     data_val = torch.utils.data.DataLoader(ds_val, batch_size=batch_size, shuffle=False, num_workers=2)
     input_dim = ds_train[0][0].shape[-1]
     sample = ds_train[0][0]
     num_patches = sample.numel() // (len(levels) * input_dim)
-    patch_names = ["CLS"] if num_patches == 1 else ["Corner_TL", "Corner_TR", "Corner_BL", "Corner_BR", "Center_TL", "Center_TR", "Center_BL", "Center_BR"]
+    patch_names = struct_sets_versions[version]["patch_attention"]
+    
     print (f"Input dimension: {input_dim}, Number of patches: {num_patches} (Sample shape: {sample.shape})")
     
     for level_idx, level in enumerate(levels):
-        print(f"Training {version} classificator for level {level}\n")
+        print(f"Training {version} classificator with {model_string} for level {level}\n")
 
-        if model_string not in ["mlp", "linear"]:
+        if model_string in ["mlp", "linear"]:
             models = []
             for _ in range(num_patches):
                 if model_string == "mlp":
@@ -233,7 +241,7 @@ def train(model_string='mlp', device=None, num_epochs=10, batch_size=32, train_d
 
                 for m in models: m.train()
                 
-                for embeddings , labels in tqdm(data_train, desc=f"Epoch {epoch+1}/{num_epochs}", leave=False):
+                for embeddings , labels, _ in tqdm(data_train, desc=f"Epoch {epoch+1}/{num_epochs}", leave=False):
                         labels = labels.to(device)
                         embeddings = embeddings.view(embeddings.size(0), len(levels), num_patches, input_dim)
 
@@ -285,10 +293,17 @@ def train(model_string='mlp', device=None, num_epochs=10, batch_size=32, train_d
 
                      
 
-def test(cross_validate=False, device=None, model_string="mlp", batch_size=64, test_dataset="stylegan1", version="unified", levels=LEVELS_V1):
+def test(cross_validate=False, device=None, model_string="mlp", batch_size=32, test_dataset="stylegan1", version="unified", levels=LEVELS_V1):
 
-    target_fake = "fake_stablediffusion" if (test_dataset == "stylegan1" and cross_validate) or (test_dataset == "stablediffusion" and not cross_validate) else "fake_stylegan1"
-    string_cross_val = "_vs_Stable_Diffusion_" if cross_validate and test_dataset=="stylegan1" else ("_vs_SG_" if cross_validate else "_")
+    if cross_validate:
+        target_fake = "fake_2" if test_dataset == "fake_1" else "fake_1"
+    else:
+        target_fake = test_dataset
+
+    train_name = struct_sets_versions[version]["names"][test_dataset].replace(" ", "")
+    test_name = struct_sets_versions[version]["names"][target_fake].replace(" ", "")
+    
+    string_cross_val = f"_Train-{train_name}_Test-{test_name}_" if cross_validate else f"_{test_name}_"
     
     emb_dir = f"dataset_embeddings_{version}"
     
@@ -299,7 +314,7 @@ def test(cross_validate=False, device=None, model_string="mlp", batch_size=64, t
     input_dim = test_loader['real'].dataset[0][0].shape[-1]
     sample_embedding = test_loader['real'].dataset[0][0]
     num_patches = sample_embedding.numel() // (len(levels) * input_dim)
-    patch_names = ["CLS"] if num_patches == 1 else ["Corner_TL", "Corner_TR", "Corner_BL", "Corner_BR", "Center_TL", "Center_TR", "Center_BL", "Center_BR"]
+    patch_names = struct_sets_versions[version]["patch_attention"]
     load_dir = f"classificators_{version}/{model_string}/{test_dataset}"
 
     print(f"Loading {len(levels) * num_patches} models...")
@@ -337,7 +352,6 @@ def test(cross_validate=False, device=None, model_string="mlp", batch_size=64, t
                     
                     all_outputs[l_idx][p_idx].append(probs)
 
-    # 5. Calcolo delle metriche e salvataggio
     all_labels = torch.cat(all_labels).numpy()
     results = []
     
@@ -349,13 +363,13 @@ def test(cross_validate=False, device=None, model_string="mlp", batch_size=64, t
             results.append({'Level': level, 'Patch': patch_name, 'Accuracy': acc})
     
     os.makedirs("csv_results", exist_ok=True)
-    csv_name = f"csv_results/accuracy{string_cross_val}{version}_{test_dataset}_{model_string}.csv"
+    csv_name = f"csv_results/accuracy{string_cross_val}{version}_{model_string}.csv"
     pd.DataFrame(results).to_csv(csv_name, index=False)
     print(f"\nResults saved successfully to {csv_name}!")
 
 
 # ==========================================
-# 4. MAIN & ARGPARSE UNIFICATO
+#               MAIN & ARGPARSE 
 # ==========================================
 
 if __name__ == "__main__":
@@ -367,13 +381,11 @@ if __name__ == "__main__":
     parser.add_argument("--create_embeddings", action='store_true')
     parser.add_argument("--mode", type=str, choices=["train", "test"])
     parser.add_argument("--num_epochs", type=int, default=10)
-    parser.add_argument("--dataset", type=str, choices=["stylegan1", "stablediffusion"], default="stylegan1")
+    parser.add_argument("--dataset", type=str, choices=["fake_1", "fake_2"], default="fake_1", help="Select which fake dataset to use as target (based on version dict)")
     parser.add_argument("--cross_validate", action='store_true', help="Enable cross validation on testing")
-    parser.add_argument("--number of levels", type=int, default=12, help="Number of levels to extract (max 12 for V1)")
-    
-    # Argomenti esclusivi V1
+    parser.add_argument("--number_of_levels", type=int, default=12, help="Number of levels to extract")
     parser.add_argument("--classificator_model", type=str, choices=["mlp","svm","linear"], default="linear", help="(V1 Only) Model type")
-    parser.add_argument("--cross_validate", action='store_true', help="(V1 Only) Enable cross validation on testing")
+
 
     args = vars(parser.parse_args())
     device = torch.device(args['device'])
