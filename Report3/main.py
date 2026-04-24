@@ -30,7 +30,11 @@ fake_data_StyleGAN1_path = "/oblivion/Datasets/FFHQ/generated/stylegan1-psi-0.5/
 fake_data_StableDiffusion_path = "/oblivion/Datasets/FFHQ/generated/sdv1_4/images1024x1024"
 fake_data_SG3_path = "/oblivion/Datasets/FFHQ/generated/stylegan3-psi-0.5/images1024x1024"
 fake_data_SGXL_path = "/oblivion/Datasets/FFHQ/generated/styleganxl-psi-0.5/images1024x1024"
+
 ACC_THRESHOLD = 0.5
+
+emb_path_array = ["dataset_embeddings_v1\fake1\test_set","dataset_embeddings_v1\fake2\test_set", "dataset_embeddings_v2\fake1\test_set","dataset_embeddings_v2\fake2\test_set",
+                    "dataset_embeddings_v3\fake1\test_set","dataset_embeddings_v3\fake2\test_set"]
 
 struct_sets_versions = {
     "v1": { 
@@ -49,6 +53,7 @@ struct_sets_versions = {
         "fake_1": fake_data_SG3_path,
         "fake_2": fake_data_SGXL_path,
         "names": {"fake_1": "StyleGAN 3", "fake_2": "StyleGAN XL"},
+        "test_embedding_path": {"fake_1": "dataset_embeddings_v3/test_set/fake_1/embeddings.pt", "fake_2": "dataset_embeddings_v3/test_set/fake_2/embeddings.pt"},
         "patch_attention": ["Corner_TL","Corner_TR"]
     }
 }
@@ -293,80 +298,154 @@ def train(model_string='mlp', device=None, num_epochs=10, batch_size=32, train_d
 
                      
 
-def test(cross_validate=False, device=None, model_string="mlp", batch_size=32, test_dataset="stylegan1", version="unified", levels=LEVELS_V1):
+def test(cross_validate=False, device=None, model_string="mlp", batch_size=32, path_train=None, path_test=None):
 
-    if cross_validate:
-        target_fake = "fake_2" if test_dataset == "fake_1" else "fake_1"
-    else:
-        target_fake = test_dataset
-
-    train_name = struct_sets_versions[version]["names"][test_dataset].replace(" ", "")
-    test_name = struct_sets_versions[version]["names"][target_fake].replace(" ", "")
+    train_parts = path_train.replace("\\", "/").split('/')
+    train_vers = train_parts[0].replace("dataset_embeddings_", "")
+    train_target = train_parts[1]
+    train_name = struct_sets_versions[train_vers]["names"][train_target].replace(" ", "")
     
+    test_parts = path_test.replace("\\", "/").split('/')
+    test_vers = test_parts[0].replace("dataset_embeddings_", "")
+    test_target = test_parts[1]
+    test_name = struct_sets_versions[test_vers]["names"][test_target].replace(" ", "")
+
+    levels_dict = {
+        "v1": LEVELS_V1, 
+        "v2": LEVELS_V2, 
+        "v3": LEVELS_V2,
+    }
+    
+    train_levels = levels_dict[train_vers]
+    test_levels = levels_dict[test_vers]
+    train_patches = struct_sets_versions[train_vers]["patch_attention"]
+    test_patches = struct_sets_versions[test_vers]["patch_attention"]
+
+    common_levels = [l for l in train_levels if l in test_levels]
+    common_patches = [p for p in train_patches if p in test_patches]
+
+    if not common_levels or not common_patches:
+        raise ValueError(f"CRITICAL ERROR: Nessuna intersezione. Livelli comuni: {len(common_levels)}, Patch comuni: {len(common_patches)}.")
+
     string_cross_val = f"_Train-{train_name}_Test-{test_name}_" if cross_validate else f"_{test_name}_"
-    
-    emb_dir = f"dataset_embeddings_{version}"
+    emb_dir = f"dataset_embeddings_{test_vers}"
     
     test_loader = get_separated_dataloaders(emb_dir, batch_size=batch_size, split='test_set')
-    ds_test = torch.utils.data.ConcatDataset([test_loader['real'].dataset, test_loader[target_fake].dataset])
+    ds_test = torch.utils.data.ConcatDataset([test_loader['real'].dataset, test_loader[test_target].dataset])
     data_test = torch.utils.data.DataLoader(ds_test, batch_size=batch_size, shuffle=False)
     
-    input_dim = test_loader['real'].dataset[0][0].shape[-1]
-    sample_embedding = test_loader['real'].dataset[0][0]
-    num_patches = sample_embedding.numel() // (len(levels) * input_dim)
-    patch_names = struct_sets_versions[version]["patch_attention"]
-    load_dir = f"classificators_{version}/{model_string}/{test_dataset}"
+    input_dim = test_loader['real'].dataset[0][0].shape[-1]  
+    load_dir = f"classificators_{train_vers}/{model_string}/{train_target}"
 
-    print(f"Loading {len(levels) * num_patches} models...")
-    loaded_models = [[None for _ in range(num_patches)] for _ in range(len(levels))]
+    print(f"Loading {len(common_levels) * len(common_patches)} intersection models...")
     
-    for l_idx, level in enumerate(levels):
-        for p_idx, patch_name in enumerate(patch_names):
+    loaded_models = {}
+    for level in common_levels:
+        for patch_name in common_patches:
             model_path = f'{load_dir}/classificator_level_{level}_{patch_name}'
             
             if model_string in ["mlp", "linear"]:
                 model = nn.Sequential(nn.Linear(input_dim, 256), nn.ReLU(), nn.Linear(256, 2)).to(device) if model_string == "mlp" else nn.Linear(input_dim, 2).to(device)
                 model.load_state_dict(torch.load(f"{model_path}.pt", map_location=device, weights_only=True))
                 model.eval()
-                loaded_models[l_idx][p_idx] = model
+                loaded_models[(level, patch_name)] = model
             elif model_string == "svm":
-                loaded_models[l_idx][p_idx] = joblib.load(f"{model_path}.pkl")
+                loaded_models[(level, patch_name)] = joblib.load(f"{model_path}.pkl")
 
     all_labels = []
-    all_outputs = [[[] for _ in range(num_patches)] for _ in range(len(levels))]
+    all_outputs = { (l, p): [] for l in common_levels for p in common_patches }
     
     with torch.no_grad():
         for embeddings, labels, _ in tqdm(data_test, desc="Evaluating"):
             all_labels.append(labels.cpu())
             
-            embeddings = embeddings.view(embeddings.size(0), len(levels), num_patches, input_dim)
+            embeddings = embeddings.view(embeddings.size(0), len(test_levels), len(test_patches), input_dim)
             
-            for l_idx in range(len(levels)):
-                for p_idx in range(num_patches):
-                    emb_patch = embeddings[:, l_idx, p_idx, :]
+            for level in common_levels:
+                l_idx_test = test_levels.index(level)
+                
+                for patch_name in common_patches:
+                    p_idx_test = test_patches.index(patch_name)
+                    
+                    emb_patch = embeddings[:, l_idx_test, p_idx_test, :]
+                    model = loaded_models[(level, patch_name)]
                     
                     if model_string in ["mlp", "linear"]:
-                        probs = torch.softmax(loaded_models[l_idx][p_idx](emb_patch.to(device)), dim=1)[:, 1].cpu()
+                        probs = torch.softmax(model(emb_patch.to(device)), dim=1)[:, 1].cpu()
                     else:
-                        probs = torch.tensor(loaded_models[l_idx][p_idx].predict_proba(emb_patch.numpy())[:, 1])
+                        probs = torch.tensor(model.predict_proba(emb_patch.numpy())[:, 1])
                     
-                    all_outputs[l_idx][p_idx].append(probs)
+                    all_outputs[(level, patch_name)].append(probs)
 
     all_labels = torch.cat(all_labels).numpy()
     results = []
     
-    for l_idx, level in enumerate(levels):
-        for p_idx, patch_name in enumerate(patch_names):
-            # Uniamo tutte le probabilità dei batch per questa specifica patch
-            preds = torch.cat(all_outputs[l_idx][p_idx]).numpy() >= 0.5 
+    for level in common_levels:
+        for patch_name in common_patches:
+            probs_concat = torch.cat(all_outputs[(level, patch_name)]).numpy() 
+            preds = probs_concat >= 0.5 
             acc = sk_metrics.accuracy_score(all_labels, preds)
-            results.append({'Level': level, 'Patch': patch_name, 'Accuracy': acc})
+            auc = sk_metrics.roc_auc_score(all_labels, probs_concat)
+            results.append({'Level': level, 'Patch': patch_name, 'Accuracy': acc, 'AUC': auc})
     
     os.makedirs("csv_results", exist_ok=True)
-    csv_name = f"csv_results/accuracy{string_cross_val}{version}_{model_string}.csv"
+    csv_name = f"csv_results/accuracy_auc{string_cross_val}{train_vers}_to_{test_vers}_{model_string}.csv"
     pd.DataFrame(results).to_csv(csv_name, index=False)
     print(f"\nResults saved successfully to {csv_name}!")
 
+#===========================================
+#       Auxiliary functions 
+#===========================================
+
+from PIL import Image, ImageDraw
+
+def highlight_corners_and_center_grid(image_path, resolution=224, grid_size=16):
+    img = Image.open(image_path).convert("RGBA")
+    img = img.resize((resolution, resolution), Image.BICUBIC)
+    
+    overlay = Image.new('RGBA', img.size, (255, 255, 255, 0))
+    draw = ImageDraw.Draw(overlay)
+    
+    # Calcoliamo la dimensione della singola patch in pixel dinamicamente
+    patch_size = resolution // grid_size 
+    print(f"Risoluzione: {resolution}x{resolution} | Griglia: {grid_size}x{grid_size}")
+    print(f"Ogni singola patch misurerà {patch_size}x{patch_size} pixel.")
+    
+    # 1. Coordinate (Riga, Colonna) dei quattro angoli
+    patches_to_color = [
+        (0, 0),                         # Angolo in Alto a Sinistra
+        (0, grid_size - 1),             # Angolo in Alto a Destra
+        (grid_size - 1, 0),             # Angolo in Basso a Sinistra
+        (grid_size - 1, grid_size - 1), # Angolo in Basso a Destra
+    ]
+    
+    # 2. Coordinate (Riga, Colonna) dei quattro quadratini centrali
+    # Per una griglia 16x16, i centri saranno le righe/colonne 7 e 8
+    m1 = grid_size // 2 - 1
+    m2 = grid_size // 2
+    patches_to_color.extend([
+        (m1, m1), # Centro Alto-Sinistra
+        (m1, m2), # Centro Alto-Destra
+        (m2, m1), # Centro Basso-Sinistra
+        (m2, m2)  # Centro Basso-Destra
+    ])
+
+    # --- DISEGNO SULL'OVERLAY ---
+    for row, col in patches_to_color:
+        # Moltiplichiamo riga e colonna per la dimensione in pixel per trovare le coordinate esatte
+        x0 = col * patch_size
+        y0 = row * patch_size
+        x1 = x0 + patch_size
+        y1 = y0 + patch_size
+        
+        # Disegniamo il quadratino (Rosso al 40% di opacità con bordi pieni)
+        draw.rectangle([x0, y0, x1, y1], fill=(255, 0, 0, 100), outline=(255, 0, 0, 255), width=2)
+
+    # Uniamo l'overlay all'immagine originale
+    final_img = Image.alpha_composite(img, overlay).convert("RGB")
+    print(f"Evidenziate correttamente le {len(patches_to_color)} patch target.")
+    
+    return final_img
 
 # ==========================================
 #               MAIN & ARGPARSE 
@@ -400,4 +479,43 @@ if __name__ == "__main__":
     if args['mode'] == "train":
         train(model_string=args['classificator_model'], device=device, num_epochs=args['num_epochs'], batch_size=args['batch_size'], train_dataset=args['dataset'], version=version, levels=LEVELS_V1 if version == "v1" else LEVELS_V2)
     elif args['mode'] == "test":
-        test(cross_validate=args['cross_validate'], device=device, model_string=args['classificator_model'], batch_size=args['batch_size'], test_dataset=args['dataset'], version=version, levels=LEVELS_V1 if version == "v1" else LEVELS_V2)
+
+        emb_path_options = []
+        menu_descriptions = []
+
+        for v_key, config in struct_sets_versions.items():
+            for f_key in ["fake_1", "fake_2"]:
+                path = f"dataset_embeddings_{v_key}/{f_key}/test_set"
+                emb_path_options.append(path)
+                
+                name = config["names"][f_key]
+                patches = ", ".join(config["patch_attention"])
+                menu_descriptions.append(f"[{v_key.upper()}] {name} (Tokens: {patches})")
+
+        dataset_chosen = {"training":None , "testing":None}
+        
+        if args['cross_validate']:
+            print("\n" + "="*60)
+            print("CROSS-DATASET MODE: Select two different datasets")
+            print("="*60)
+            for i in range(2):
+                role = "TRAIN (Source Weights)" if i == 0 else "TEST (Target Evaluation)"
+                for idx, desc in enumerate(menu_descriptions):
+                    print(f"{idx + 1}. {desc}")
+                
+                choice = int(input(f"\nSelect dataset for {role}: ")) - 1
+                key = "training" if i == 0 else "testing"
+                dataset_chosen[key] = emb_path_options[choice]
+                print(f"-> Selected: {dataset_chosen[key]}\n")
+        else:
+            print("\n" + "="*60)
+            print("STANDARD TEST MODE (NO CROSS-DATASET): Select the dataset")
+            print("="*60)
+            for idx, desc in enumerate(menu_descriptions):
+                print(f"{idx + 1}. {desc}")
+            
+            choice = int(input("\nEnter the dataset number: ")) - 1
+            dataset_chosen["training"] = emb_path_options[choice]
+            dataset_chosen["testing"] = emb_path_options[choice]
+
+        test(cross_validate=args['cross_validate'], device=device, model_string=args['classificator_model'], batch_size=args['batch_size'], levels = args['number_of_levels'], path_train=dataset_chosen["training"], path_test=dataset_chosen["testing"])

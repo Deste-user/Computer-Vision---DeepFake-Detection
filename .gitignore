@@ -8,3 +8,6 @@ Report2/dataset_embeddings_v2/*
 #Think about it.
 Report2/classificators_v2/*
 *.pt
+dataset_embeddings_v2/*
+dataset_embeddings_v1/*
+dataset_embeddings_v3/*
