@@ -24,6 +24,10 @@ import openpyxl
 #================================
 LEVELS_V1 = [1,3,5,7,9,11,13,15,17,19,21,23]
 LEVELS_V2 = [3,7,11,15,19,23]
+PHYSICAL_PATCH_ORDER = [
+    "Corner_TL", "Corner_TR", "Corner_BL", "Corner_BR", 
+    "Center_TL", "Center_TR", "Center_BL", "Center_BR"
+]
 
 real_data_FFHQ_path = "/oblivion/Datasets/FFHQ/images1024x1024"
 fake_data_StyleGAN1_path = "/oblivion/Datasets/FFHQ/generated/stylegan1-psi-0.5/images1024x1024"
@@ -177,7 +181,7 @@ def get_separated_dataloaders(embeddings_base_path, batch_size=32, split='train_
 
 
 
-def validation_all_patches(models, data_val, level_idx, num_levels, num_patches, input_dim, patiences, device):
+def validation_all_patches(models, data_val, level_idx, num_levels, num_patches, input_dim, patiences, device,patch_names):
     for m in models: m.eval()
     criterion = nn.CrossEntropyLoss()
     val_losses = [0.0] * num_patches
@@ -186,13 +190,14 @@ def validation_all_patches(models, data_val, level_idx, num_levels, num_patches,
     with torch.no_grad():
         for embeddings, labels, _ in data_val:
             labels = labels.to(device)
-            embeddings = embeddings.view(embeddings.size(0), num_levels, num_patches, input_dim)
+            data_num_patches = embeddings.shape[-1] // input_dim
+            embeddings = embeddings.view(embeddings.size(0), num_levels, data_num_patches, input_dim)
             
             for p_idx in range(num_patches):
                 if patiences[p_idx] >= 3: 
                     continue
-                
-                emb_patch = embeddings[:, level_idx, p_idx, :].to(device)
+                physical_idx = 0 if patch_names[p_idx] == "CLS" else PHYSICAL_PATCH_ORDER.index(patch_names[p_idx])
+                emb_patch = embeddings[:, level_idx, physical_idx, :].to(device)
                 val_losses[p_idx] += criterion(models[p_idx](emb_patch), labels).item() * embeddings.size(0)
             
             total += embeddings.size(0)           
@@ -216,12 +221,13 @@ def train(model_string='mlp', device=None, num_epochs=10, batch_size=32, train_d
     
     data_train = torch.utils.data.DataLoader(ds_train, batch_size=batch_size, shuffle=True, num_workers=2)
     data_val = torch.utils.data.DataLoader(ds_val, batch_size=batch_size, shuffle=False, num_workers=2)
-    input_dim = ds_train[0][0].shape[-1]
+    input_dim = 1024
     sample = ds_train[0][0]
-    num_patches = sample.numel() // (len(levels) * input_dim)
+    data_num_patches = sample.shape[-1] // input_dim
     patch_names = struct_sets_versions[version]["patch_attention"]
+    num_patches = len(patch_names)
     
-    print (f"Input dimension: {input_dim}, Number of patches: {num_patches} (Sample shape: {sample.shape})")
+    print (f"Input dimension: {input_dim}, Patches in data: {data_num_patches}, Training {num_patches} patches.")
     
     for level_idx, level in enumerate(levels):
         print(f"Training {version} classificator with {model_string} for level {level}\n")
@@ -248,19 +254,19 @@ def train(model_string='mlp', device=None, num_epochs=10, batch_size=32, train_d
                 
                 for embeddings , labels, _ in tqdm(data_train, desc=f"Epoch {epoch+1}/{num_epochs}", leave=False):
                         labels = labels.to(device)
-                        embeddings = embeddings.view(embeddings.size(0), len(levels), num_patches, input_dim)
+                        embeddings = embeddings.view(embeddings.size(0), len(levels), data_num_patches, input_dim)
 
                         for p_idx in range(num_patches):
                             if patiences[p_idx] >= 3: continue
-
-                            emb_patch = embeddings[:, level_idx, p_idx, :]
+                            physical_idx = 0 if patch_names[p_idx] == "CLS" else PHYSICAL_PATCH_ORDER.index(patch_names[p_idx])
+                            emb_patch = embeddings[:, level_idx, physical_idx, :].to(device)
                             optimizers[p_idx].zero_grad()
                             loss = criterion(models[p_idx](emb_patch),labels)
                             loss.backward()
                             optimizers[p_idx].step()
                 
                 val_losses = validation_all_patches(models=models, data_val=data_val, level_idx=level_idx, 
-                    num_levels=len(levels), num_patches=num_patches, input_dim=input_dim, patiences=patiences, device=device )
+                    num_levels=len(levels), num_patches=num_patches, input_dim=input_dim, patiences=patiences, device=device, patch_names=patch_names)
                 
                 for p_idx in range(num_patches):
                     if patiences[p_idx] >= 3: continue
@@ -283,9 +289,10 @@ def train(model_string='mlp', device=None, num_epochs=10, batch_size=32, train_d
             all_labels = []
             
             for embeddings, labels, _ in tqdm(data_train):
-                embeddings = embeddings.view(embeddings.size(0), len(levels), num_patches, input_dim)
+                embeddings = embeddings.view(embeddings.size(0), len(levels), data_num_patches, input_dim)
                 for p_idx in range(num_patches):
-                    all_embeddings[p_idx].append(embeddings[:, level_idx, p_idx, :].cpu().numpy())
+                    physical_idx = 0 if patch_names[p_idx] == "CLS" else PHYSICAL_PATCH_ORDER.index(patch_names[p_idx])
+                    all_embeddings[p_idx].append(embeddings[:, level_idx, physical_idx, :].cpu().numpy())
                 all_labels.append(labels.cpu().numpy())
             
             y = np.concatenate(all_labels, axis=0)
@@ -334,7 +341,9 @@ def test(cross_validate=False, device=None, model_string="mlp", batch_size=32, p
     ds_test = torch.utils.data.ConcatDataset([test_loader['real'].dataset, test_loader[test_target].dataset])
     data_test = torch.utils.data.DataLoader(ds_test, batch_size=batch_size, shuffle=False)
     
-    input_dim = test_loader['real'].dataset[0][0].shape[-1]  
+    input_dim = 1024  
+    sample = test_loader['real'].dataset[0][0]
+    data_num_patches = sample.shape[-1] // input_dim
     load_dir = f"classificators_{train_vers}/{model_string}/{train_target}"
 
     print(f"Loading {len(common_levels) * len(common_patches)} intersection models...")
@@ -359,13 +368,13 @@ def test(cross_validate=False, device=None, model_string="mlp", batch_size=32, p
         for embeddings, labels, _ in tqdm(data_test, desc="Evaluating"):
             all_labels.append(labels.cpu())
             
-            embeddings = embeddings.view(embeddings.size(0), len(test_levels), len(test_patches), input_dim)
+            embeddings = embeddings.view(embeddings.size(0), len(test_levels), data_num_patches, input_dim)
             
             for level in common_levels:
                 l_idx_test = test_levels.index(level)
                 
                 for patch_name in common_patches:
-                    p_idx_test = test_patches.index(patch_name)
+                    p_idx_test = 0 if patch_name == "CLS" else PHYSICAL_PATCH_ORDER.index(patch_name)
                     
                     emb_patch = embeddings[:, l_idx_test, p_idx_test, :]
                     model = loaded_models[(level, patch_name)]
@@ -518,4 +527,4 @@ if __name__ == "__main__":
             dataset_chosen["training"] = emb_path_options[choice]
             dataset_chosen["testing"] = emb_path_options[choice]
 
-        test(cross_validate=args['cross_validate'], device=device, model_string=args['classificator_model'], batch_size=args['batch_size'], levels = args['number_of_levels'], path_train=dataset_chosen["training"], path_test=dataset_chosen["testing"])
+        test(cross_validate=args['cross_validate'], device=device, model_string=args['classificator_model'], batch_size=args['batch_size'], path_train=dataset_chosen["training"], path_test=dataset_chosen["testing"])
