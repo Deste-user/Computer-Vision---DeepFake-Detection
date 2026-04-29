@@ -15,6 +15,7 @@ from sklearn import svm
 from sklearn import metrics as sk_metrics
 from sklearn.linear_model import SGDClassifier
 from sklearn.calibration import CalibratedClassifierCV 
+from PIL import Image, ImageDraw, ImageColor
 import matplotlib.pyplot as plt
 from matplotlib import patches
 import matplotlib.patheffects as path_effects
@@ -58,7 +59,7 @@ struct_sets_versions = {
         "fake_2": fake_data_SGXL_path,
         "names": {"fake_1": "StyleGAN 3", "fake_2": "StyleGAN XL"},
         "test_embedding_path": {"fake_1": "dataset_embeddings_v3/test_set/fake_1/embeddings.pt", "fake_2": "dataset_embeddings_v3/test_set/fake_2/embeddings.pt"},
-        "patch_attention": ["Corner_TL","Corner_TR"]
+        "patch_attention": ["Corner_TL","Center_TL"]
     }
 }
 
@@ -406,55 +407,75 @@ def test(cross_validate=False, device=None, model_string="mlp", batch_size=32, p
 #       Auxiliary functions 
 #===========================================
 
-from PIL import Image, ImageDraw
+def plot_graph(dir, title, metric):
+    dir_imgs_results = f"plots_results/{metric}"
 
-def highlight_corners_and_center_grid(image_path, resolution=224, grid_size=16):
-    img = Image.open(image_path).convert("RGBA")
-    img = img.resize((resolution, resolution), Image.BICUBIC)
+    if not os.path.exists(dir_imgs_results):
+        os.makedirs(dir_imgs_results)
+
+    df = pd.read_csv(dir)
+    df = df.sort_values(by=[ 'Patch', 'Level'])
+    plt.figure(figsize=(10, 6))
+    for patch in df['Patch'].unique():
+        patch_data = df[df['Patch'] == patch]
+        plt.plot(patch_data['Level'], patch_data[metric], marker='o', label=patch)
+
+    plt.title(title)
+    plt.xlabel('Level') 
+    plt.ylabel(metric)
+    plt.xticks(df['Level'].unique())
+    plt.grid()
+    plt.legend()
+    save_path = os.path.join(dir_imgs_results, f"{title.replace(' ', '_')}.png")
+    plt.savefig(save_path)
+    plt.close()
+
+def plot_all_results():
+    csv_dir = "csv_results"
+    for file in os.listdir(csv_dir):
+        if file.endswith(".csv"):
+            df = pd.read_csv(os.path.join(csv_dir, file))
+            title_base = file.replace(".csv", "")
+            plot_graph(os.path.join(csv_dir, file), f"{title_base} - Accuracy", "Accuracy")
+            plot_graph(os.path.join(csv_dir, file), f"{title_base} - AUC", "AUC")
+    return                 
+
+
+def evidence_patch(img_path, folder_name,idx ,patch_dim=14, resize_to=1080):
+    img = Image.open(img_path).convert('RGB').resize((resize_to, resize_to), Image.BICUBIC)
     
     overlay = Image.new('RGBA', img.size, (255, 255, 255, 0))
     draw = ImageDraw.Draw(overlay)
+    w, h = img.width, img.height
+    mid_x, mid_y = w // 2, h // 2
     
-    # Calcoliamo la dimensione della singola patch in pixel dinamicamente
-    patch_size = resolution // grid_size 
-    print(f"Risoluzione: {resolution}x{resolution} | Griglia: {grid_size}x{grid_size}")
-    print(f"Ogni singola patch misurerà {patch_size}x{patch_size} pixel.")
-    
-    # 1. Coordinate (Riga, Colonna) dei quattro angoli
-    patches_to_color = [
-        (0, 0),                         # Angolo in Alto a Sinistra
-        (0, grid_size - 1),             # Angolo in Alto a Destra
-        (grid_size - 1, 0),             # Angolo in Basso a Sinistra
-        (grid_size - 1, grid_size - 1), # Angolo in Basso a Destra
-    ]
-    
-    # 2. Coordinate (Riga, Colonna) dei quattro quadratini centrali
-    # Per una griglia 16x16, i centri saranno le righe/colonne 7 e 8
-    m1 = grid_size // 2 - 1
-    m2 = grid_size // 2
-    patches_to_color.extend([
-        (m1, m1), # Centro Alto-Sinistra
-        (m1, m2), # Centro Alto-Destra
-        (m2, m1), # Centro Basso-Sinistra
-        (m2, m2)  # Centro Basso-Destra
-    ])
-
-    # --- DISEGNO SULL'OVERLAY ---
-    for row, col in patches_to_color:
-        # Moltiplichiamo riga e colonna per la dimensione in pixel per trovare le coordinate esatte
-        x0 = col * patch_size
-        y0 = row * patch_size
-        x1 = x0 + patch_size
-        y1 = y0 + patch_size
+    # Dizionario con sintassi corretta: "Nome": ((coord_x, coord_y), "colore")
+    patches_data = {
+        # ANGOLI (Corners)
+        "Corner_TL": ((0, 0), "green"),                                     # Top-Left
+        "Corner_TR": ((w - patch_dim, 0), "red"),                           # Top-Right
+        "Corner_BL": ((0, h - patch_dim), "blue"),                          # Bottom-Left
+        "Corner_BR": ((w - patch_dim, h - patch_dim), "orange"),            # Bottom-Right
         
-        # Disegniamo il quadratino (Rosso al 40% di opacità con bordi pieni)
-        draw.rectangle([x0, y0, x1, y1], fill=(255, 0, 0, 100), outline=(255, 0, 0, 255), width=2)
-
-    # Uniamo l'overlay all'immagine originale
-    final_img = Image.alpha_composite(img, overlay).convert("RGB")
-    print(f"Evidenziate correttamente le {len(patches_to_color)} patch target.")
+        # CENTRI (Centers)
+        "Center_TL": ((mid_x - patch_dim, mid_y - patch_dim), "pink"),      # Centro Top-Left
+        "Center_TR": ((mid_x, mid_y - patch_dim), "grey"),                  # Centro Top-Right
+        "Center_BL": ((mid_x - patch_dim, mid_y), "purple"),                # Centro Bottom-Left
+        "Center_BR": ((mid_x, mid_y), "brown")                              # Centro Bottom-Right
+    }
     
-    return final_img
+    alpha = 100
+    for _ , ((x, y), color) in patches_data.items():
+        r, g, b = ImageColor.getrgb(color)
+        
+        fill_color = (r, g, b, alpha)
+        draw.rectangle([x, y, x + patch_dim, y + patch_dim],fill=fill_color ,outline=color,width=1)
+
+    img = Image.alpha_composite(img.convert('RGBA'), overlay).convert('RGB')
+
+    img.save(f"./visualization_dataset/{folder_name}/patches_visualization_{idx}.jpeg", quality=95)
+    return img
+
 
 # ==========================================
 #               MAIN & ARGPARSE 
@@ -467,15 +488,31 @@ if __name__ == "__main__":
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--create_embeddings", action='store_true')
-    parser.add_argument("--mode", type=str, choices=["train", "test"])
+    parser.add_argument("--mode", type=str, choices=["train", "test","draw"])
     parser.add_argument("--num_epochs", type=int, default=10)
     parser.add_argument("--dataset", type=str, choices=["fake_1", "fake_2"], default="fake_1", help="Select which fake dataset to use as target (based on version dict)")
     parser.add_argument("--cross_validate", action='store_true', help="Enable cross validation on testing")
     parser.add_argument("--number_of_levels", type=int, default=12, help="Number of levels to extract")
     parser.add_argument("--classificator_model", type=str, choices=["mlp","svm","linear"], default="linear", help="(V1 Only) Model type")
-
+    parser.add_argument("--plot_results", action='store_true', help="Plot all results from CSV files in the csv_results directory")
+    parser.add_argument("--evidence_patch", action='store_true', help="Path to an image to visualize the patch locations on it")
 
     args = vars(parser.parse_args())
+
+    if(args['evidence_patch']):
+        if not os.path.exists("./visualization_dataset"):
+            print("No directory named 'visualization_dataset' found. Please create it and add an image to visualize.")
+        for fold in os.listdir("./visualization_dataset"):
+            c=0
+            for file in os.listdir(os.path.join("./visualization_dataset", fold)):
+                if file.lower().endswith((".png", ".jpg")):
+                    img_path = os.path.join("./visualization_dataset", fold, file)
+                    print(f"Visualizing patches on image: {img_path}")
+                    c+=1
+                    evidence_patch(img_path, folder_name=fold, idx=c)
+        sys.exit(0)
+
+
     device = torch.device(args['device'])
     version = args['experiment_version']
 
@@ -528,3 +565,5 @@ if __name__ == "__main__":
             dataset_chosen["testing"] = emb_path_options[choice]
 
         test(cross_validate=args['cross_validate'], device=device, model_string=args['classificator_model'], batch_size=args['batch_size'], path_train=dataset_chosen["training"], path_test=dataset_chosen["testing"])
+    elif args['mode'] == "draw":
+        plot_all_results()
