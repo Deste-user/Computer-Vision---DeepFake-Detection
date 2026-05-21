@@ -606,7 +606,7 @@ def evidence_patch(img_path, folder_name,idx ,patch_dim=14, resize_to=224):
 if __name__ == "__main__":
     import argparse
     parser = argparse.ArgumentParser(description="Unified Script for Deepfake Detection (V1 & V2)")
-    parser.add_argument("--experiment_version", type=str, choices=["v1", "v2", "v3"], default="v2", help="Choose the logic to execute")
+    parser.add_argument("--experiment_version", type=str, choices=["v1", "v2", "v3", "v4"], default="v2", help="Choose the logic to execute")
     parser.add_argument("--batch_size", type=int, default=32)
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--create_embeddings", action='store_true')
