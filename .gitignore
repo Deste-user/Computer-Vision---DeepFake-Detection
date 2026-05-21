@@ -11,3 +11,9 @@ Report2/classificators_v2/*
 dataset_embeddings_v2/*
 dataset_embeddings_v1/*
 dataset_embeddings_v3/*
+
+Report3/classificators_v3/*
+Report3/dataset_embeddings_v3/*
+Report3/dataset_embeddings_v2/*
+Report3/dataset_embeddings_v1/*
+Report3/wandb/*

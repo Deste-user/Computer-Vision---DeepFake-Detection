@@ -1,4 +1,4 @@
-EXPERIMENT_VERSION='v3'
+EXPERIMENT_VERSION='v2 v3'
 DATASET_FAKE_VERSION='fake_1 fake_2'
 
 echo "=========================================="

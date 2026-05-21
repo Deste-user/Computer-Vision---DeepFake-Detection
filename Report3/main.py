@@ -20,6 +20,8 @@ import matplotlib.pyplot as plt
 from matplotlib import patches
 import matplotlib.patheffects as path_effects
 import openpyxl
+import wandb as wb
+
 #================================
 #       HARD CODED VALUES 
 #================================
@@ -35,6 +37,8 @@ fake_data_StyleGAN1_path = "/oblivion/Datasets/FFHQ/generated/stylegan1-psi-0.5/
 fake_data_StableDiffusion_path = "/oblivion/Datasets/FFHQ/generated/sdv1_4/images1024x1024"
 fake_data_SG3_path = "/oblivion/Datasets/FFHQ/generated/stylegan3-psi-0.5/images1024x1024"
 fake_data_SGXL_path = "/oblivion/Datasets/FFHQ/generated/styleganxl-psi-0.5/images1024x1024"
+fake_data_SG2_path = "/oblivion/Datasets/FFHQ/generated/stylegan2-psi-0.5/images1024x1024"
+fake_data_StableDiffusion2_path= "/oblivion/Datasets/FFHQ/generated/sdv2_1/images1024x1024"
 
 ACC_THRESHOLD = 0.5
 
@@ -59,7 +63,15 @@ struct_sets_versions = {
         "fake_2": fake_data_SGXL_path,
         "names": {"fake_1": "StyleGAN 3", "fake_2": "StyleGAN XL"},
         "test_embedding_path": {"fake_1": "dataset_embeddings_v3/test_set/fake_1/embeddings.pt", "fake_2": "dataset_embeddings_v3/test_set/fake_2/embeddings.pt"},
-        "patch_attention": ["Corner_TL","Center_TL"]
+        "patch_attention": ["Corner_TL", "Corner_TR", "Corner_BL", "Corner_BR", "Center_TL", "Center_TR", "Center_BL", "Center_BR"]
+    },
+
+    "v4": {
+        "fake_1": fake_data_SG2_path,
+        "fake_2": fake_data_StableDiffusion2_path,
+        "names": {"fake_1": "StyleGAN 2.1", "fake_2": {"StableDiffusion2.1"} },
+        "test_embedding_path": {"fake_1": "dataset_embeddings_v4/test_set/fake_1/embeddings.pt", "fake_2": "dataset_embeddings_v4/test_set/fake_2/embeddings.pt"},
+        "patch_attention": ["Corner_TL", "Corner_TR", "Corner_BL", "Corner_BR", "Center_TL", "Center_TR", "Center_BL", "Center_BR"]
     }
 }
 
@@ -186,6 +198,7 @@ def validation_all_patches(models, data_val, level_idx, num_levels, num_patches,
     for m in models: m.eval()
     criterion = nn.CrossEntropyLoss()
     val_losses = [0.0] * num_patches
+    val_corrects = [0.0] * num_patches
     total = 0
     
     with torch.no_grad():
@@ -199,19 +212,30 @@ def validation_all_patches(models, data_val, level_idx, num_levels, num_patches,
                     continue
                 physical_idx = 0 if patch_names[p_idx] == "CLS" else PHYSICAL_PATCH_ORDER.index(patch_names[p_idx])
                 emb_patch = embeddings[:, level_idx, physical_idx, :].to(device)
-                val_losses[p_idx] += criterion(models[p_idx](emb_patch), labels).item() * embeddings.size(0)
+
+                outputs = models[p_idx](emb_patch)
+                loss = criterion(outputs, labels)
+                
+                val_losses[p_idx] += loss.item() * embeddings.size(0)
+                preds = torch.argmax(outputs, dim=1)
+                val_corrects[p_idx] += (preds == labels).sum().item()
             
             total += embeddings.size(0)           
+    
+    val_accuracies = [0.0] * num_patches
     for p_idx in range(num_patches):
         if patiences[p_idx] < 3:
             val_losses[p_idx] /= total
+            val_accuracies[p_idx] = val_corrects[p_idx] / total
         else:
-            val_losses[p_idx] = float('inf') 
-    return val_losses 
+            val_losses[p_idx] = float('inf')
+            val_accuracies[p_idx] = 0.0
+    return val_losses, val_accuracies
 
 
 # This function trains a classificator for each specified level in LEVELS_V1
 def train(model_string='mlp', device=None, num_epochs=10, batch_size=32, train_dataset="fake_1", version="v1", levels=LEVELS_V1):
+    
     save_dir = f"classificators_{version}/{model_string}/{train_dataset}"
     os.makedirs(save_dir, exist_ok=True)
     
@@ -230,8 +254,21 @@ def train(model_string='mlp', device=None, num_epochs=10, batch_size=32, train_d
     
     print (f"Input dimension: {input_dim}, Patches in data: {data_num_patches}, Training {num_patches} patches.")
     
+
+    
+
+
     for level_idx, level in enumerate(levels):
         print(f"Training {version} classificator with {model_string} for level {level}\n")
+        should_log = level in [3, 7, 11]
+        
+        if should_log:
+            wb.init(
+                project="Deepfake-Patch-Detection",
+                name=f"{version}_Level_{level}_{train_dataset}_{model_string}",
+                group=f"Experiment_{train_dataset}",
+                reinit=True
+            )
 
         if model_string in ["mlp", "linear"]:
             models = []
@@ -252,23 +289,49 @@ def train(model_string='mlp', device=None, num_epochs=10, batch_size=32, train_d
                 if all(p >= 3 for p in patiences): break
 
                 for m in models: m.train()
+
+                epoch_train_losses = [0.0] * num_patches 
+                epoch_train_corrects = [0.0] * num_patches 
+                train_total = 0
                 
                 for embeddings , labels, _ in tqdm(data_train, desc=f"Epoch {epoch+1}/{num_epochs}", leave=False):
                         labels = labels.to(device)
                         embeddings = embeddings.view(embeddings.size(0), len(levels), data_num_patches, input_dim)
+                        train_total += embeddings.size(0)
 
                         for p_idx in range(num_patches):
                             if patiences[p_idx] >= 3: continue
                             physical_idx = 0 if patch_names[p_idx] == "CLS" else PHYSICAL_PATCH_ORDER.index(patch_names[p_idx])
                             emb_patch = embeddings[:, level_idx, physical_idx, :].to(device)
                             optimizers[p_idx].zero_grad()
-                            loss = criterion(models[p_idx](emb_patch),labels)
+                            outputs = models[p_idx](emb_patch)
+                            loss = criterion(outputs, labels)
                             loss.backward()
                             optimizers[p_idx].step()
+
+                            epoch_train_losses[p_idx] += loss.item() * embeddings.size(0)
+                            preds = torch.argmax(outputs, dim=1)
+                            epoch_train_corrects[p_idx] += (preds == labels).sum().item()
                 
-                val_losses = validation_all_patches(models=models, data_val=data_val, level_idx=level_idx, 
+                val_losses, val_accuracies = validation_all_patches(models=models, data_val=data_val, level_idx=level_idx, 
                     num_levels=len(levels), num_patches=num_patches, input_dim=input_dim, patiences=patiences, device=device, patch_names=patch_names)
-                
+
+                if should_log: 
+                    log_metrics = {"epoch": epoch}
+                    for p_idx in range(num_patches):
+                        if patiences[p_idx] < 3: 
+                            avg_train_loss = epoch_train_losses[p_idx] / train_total
+                            train_acc = epoch_train_corrects[p_idx] / train_total
+                            
+                            p_name = patch_names[p_idx]
+                            log_metrics[f"Loss/Training.{p_name}"] = avg_train_loss
+                            log_metrics[f"Loss/Validation.{p_name}"] = val_losses[p_idx]
+                            log_metrics[f"Accuracy/Training.{p_name}"] = train_acc
+                            log_metrics[f"Accuracy/Validation.{p_name}"] = val_accuracies[p_idx]
+                            
+                    wb.log(log_metrics)
+
+
                 for p_idx in range(num_patches):
                     if patiences[p_idx] >= 3: continue
     
@@ -303,7 +366,9 @@ def train(model_string='mlp', device=None, num_epochs=10, batch_size=32, train_d
                 classificator = CalibratedClassifierCV(SGDClassifier(loss='hinge', max_iter=1000, tol=1e-3), cv=3)
                 classificator.fit(X, y)
                 joblib.dump(classificator, f'{save_dir}/classificator_level_{level}_{patch_names[p_idx]}.pkl')
-
+        if should_log:
+            wb.finish()              
+        
                      
 
 def test(cross_validate=False, device=None, model_string="mlp", batch_size=32, path_train=None, path_test=None):
@@ -332,10 +397,12 @@ def test(cross_validate=False, device=None, model_string="mlp", batch_size=32, p
     common_levels = [l for l in train_levels if l in test_levels]
     common_patches = [p for p in train_patches if p in test_patches]
 
+    token_type = "_CLS" if common_patches[0] == "CLS" else ""
+
     if not common_levels or not common_patches:
         raise ValueError(f"CRITICAL ERROR: Nessuna intersezione. Livelli comuni: {len(common_levels)}, Patch comuni: {len(common_patches)}.")
 
-    string_cross_val = f"_Train-{train_name}_Test-{test_name}_" if cross_validate else f"_{test_name}_"
+    string_cross_val = f"Train-{train_name}_Test-{test_name}_" if cross_validate else f"{test_name}_"
     emb_dir = f"dataset_embeddings_{test_vers}"
     
     test_loader = get_separated_dataloaders(emb_dir, batch_size=batch_size, split='test_set')
@@ -399,7 +466,7 @@ def test(cross_validate=False, device=None, model_string="mlp", batch_size=32, p
             results.append({'Level': level, 'Patch': patch_name, 'Accuracy': acc, 'AUC': auc})
     
     os.makedirs("csv_results", exist_ok=True)
-    csv_name = f"csv_results/accuracy_auc{string_cross_val}{train_vers}_to_{test_vers}_{model_string}.csv"
+    csv_name = f"csv_results/{string_cross_val}{token_type}{model_string}.csv"
     pd.DataFrame(results).to_csv(csv_name, index=False)
     print(f"\nResults saved successfully to {csv_name}!")
 
@@ -420,7 +487,7 @@ def plot_graph(dir, title, metric):
         patch_data = df[df['Patch'] == patch]
         plt.plot(patch_data['Level'], patch_data[metric], marker='o', label=patch)
 
-    plt.title(title)
+    plt.title(title.replace("_", " "), fontsize=14)
     plt.xlabel('Level') 
     plt.ylabel(metric)
     plt.xticks(df['Level'].unique())
@@ -430,18 +497,73 @@ def plot_graph(dir, title, metric):
     plt.savefig(save_path)
     plt.close()
 
-def plot_all_results():
+def plot_all_results(CLS= False):
     csv_dir = "csv_results"
     for file in os.listdir(csv_dir):
         if file.endswith(".csv"):
             df = pd.read_csv(os.path.join(csv_dir, file))
             title_base = file.replace(".csv", "")
-            plot_graph(os.path.join(csv_dir, file), f"{title_base} - Accuracy", "Accuracy")
-            plot_graph(os.path.join(csv_dir, file), f"{title_base} - AUC", "AUC")
+            plot_graph(os.path.join(csv_dir, file), f"{title_base}-ACC", "Accuracy")
+            plot_graph(os.path.join(csv_dir, file), f"{title_base}-AUC", "AUC")
     return                 
 
 
-def evidence_patch(img_path, folder_name,idx ,patch_dim=14, resize_to=1080):
+def choosen_acc_to_plot(array_dirs, metric="Accuracy"):
+    common_levels = None
+    dataframes = {}
+
+    for dir_path in array_dirs:
+        df = pd.read_csv(dir_path)
+        dataframes[dir_path] = df
+        
+        df_levels = df['Level'].unique()
+        if common_levels is None:
+            common_levels = set(df_levels)
+        else:    
+            common_levels = common_levels.intersection(set(df_levels))
+            
+    common_levels = sorted(list(common_levels))
+    
+    if not common_levels:
+        print("ATTENZIONE: Nessun livello in comune tra i file forniti!")
+        return
+
+    plt.figure(figsize=(10, 6))
+
+    for dir_path, df in dataframes.items():
+        df_common = df[df['Level'].isin(common_levels)].sort_values(by=['Patch', 'Level'])
+
+        file_name = os.path.basename(dir_path).replace('.csv', '')
+
+        model_type = file_name.split("_")[-1]
+
+        for patch in df_common['Patch'].unique():
+            patch_data = df_common[df_common['Patch'] == patch]
+
+            label_name = f"{patch} ({model_type})"
+            
+            plt.plot(patch_data['Level'], patch_data[metric], marker='o', label=label_name)
+    plt.xticks(common_levels)
+    plt.xlabel('Level', fontsize=12)
+    plt.ylabel(metric, fontsize=12)
+    title =  input("\nName for the plot (without extension): ")
+    name = title.replace(" ", "_")
+    plt.title(f'{title}', fontsize=14)
+    plt.grid(True, linestyle='--', alpha=0.6)
+    
+    # Sposto la legenda fuori dal grafico se ci sono tante linee
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout()
+
+    #Insert name of the plot based on the files compared
+
+    
+    plt.savefig(f"plots_results/{name}.png", dpi=300)
+
+
+
+
+def evidence_patch(img_path, folder_name,idx ,patch_dim=14, resize_to=224):
     img = Image.open(img_path).convert('RGB').resize((resize_to, resize_to), Image.BICUBIC)
     
     overlay = Image.new('RGBA', img.size, (255, 255, 255, 0))
@@ -496,7 +618,7 @@ if __name__ == "__main__":
     parser.add_argument("--classificator_model", type=str, choices=["mlp","svm","linear"], default="linear", help="(V1 Only) Model type")
     parser.add_argument("--plot_results", action='store_true', help="Plot all results from CSV files in the csv_results directory")
     parser.add_argument("--evidence_patch", action='store_true', help="Path to an image to visualize the patch locations on it")
-
+    parser.add_argument("--plt_acc_spec", nargs='+', help="Provide paths to specific CSV files to plot accuracy comparison (only if --plot_results is set)")
     args = vars(parser.parse_args())
 
     if(args['evidence_patch']):
@@ -513,10 +635,13 @@ if __name__ == "__main__":
         sys.exit(0)
 
 
+    if (args['plt_acc_spec']):
+        choosen_acc_to_plot(args['plt_acc_spec'], metric="Accuracy")
+        sys.exit(0)
+
     device = torch.device(args['device'])
     version = args['experiment_version']
 
-    print(f"--- RUNNING EXPERIMENT {version.upper()} ---")
 
     if args['create_embeddings']:
         create_embeddings(version=version)
