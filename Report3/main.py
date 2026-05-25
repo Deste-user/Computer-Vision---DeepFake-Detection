@@ -371,7 +371,7 @@ def train(model_string='mlp', device=None, num_epochs=10, batch_size=32, train_d
         
                      
 
-def test(cross_validate=False, device=None, model_string="mlp", batch_size=32, path_train=None, path_test=None):
+def test(cross_validate=False, device=None, model_string="mlp", batch_size=32, path_train=None, path_test=None, save_results=True):
 
     train_parts = path_train.replace("\\", "/").split('/')
     train_vers = train_parts[0].replace("dataset_embeddings_", "")
@@ -433,6 +433,7 @@ def test(cross_validate=False, device=None, model_string="mlp", batch_size=32, p
     all_labels = []
     all_outputs = { (l, p): [] for l in common_levels for p in common_patches }
     
+    
     with torch.no_grad():
         for embeddings, labels, _ in tqdm(data_test, desc="Evaluating"):
             all_labels.append(labels.cpu())
@@ -457,6 +458,9 @@ def test(cross_validate=False, device=None, model_string="mlp", batch_size=32, p
 
     all_labels = torch.cat(all_labels).numpy()
     results = []
+    raw_inference_data = []
+    eval_id_string = f"{string_cross_val}{model_string}"
+
     
     for level in common_levels:
         for patch_name in common_patches:
@@ -465,10 +469,21 @@ def test(cross_validate=False, device=None, model_string="mlp", batch_size=32, p
             acc = sk_metrics.accuracy_score(all_labels, preds)
             auc = sk_metrics.roc_auc_score(all_labels, probs_concat)
             results.append({'Level': level, 'Patch': patch_name, 'Accuracy': acc, 'AUC': auc})
-    
+            for true_label, prob in zip(all_labels, probs_concat):
+                raw_inference_data.append(
+                    { 'eval_id': eval_id_string,
+                      'Level': level,
+                      'Patch': patch_name,
+                      'TrueLabel': true_label,
+                      'PredictedProb': prob})
+                
     os.makedirs("csv_results", exist_ok=True)
+    os.makedirs("csv_raw_inferences", exist_ok=True)
     csv_name = f"csv_results/{string_cross_val}{token_type}{model_string}.csv"
+    csv_raw_name = f"csv_raw_inferences/raw_{string_cross_val}{token_type}{model_string}.csv"
     pd.DataFrame(results).to_csv(csv_name, index=False)
+    pd.DataFrame(raw_inference_data).to_csv(csv_raw_name, index=False)
+
     print(f"\nResults saved successfully to {csv_name}!")
 
 #===========================================
@@ -507,6 +522,47 @@ def plot_all_results(CLS= False):
             plot_graph(os.path.join(csv_dir, file), f"{title_base}-ACC", "Accuracy")
             plot_graph(os.path.join(csv_dir, file), f"{title_base}-AUC", "AUC")
     return                 
+
+
+
+def plot_ROC_curves():
+    print("Select roc curves to plot:")
+    for i, file in enumerate(os.listdir("csv_raw_inferences")):
+        if file.endswith(".csv"):
+            print(f"{i + 1}- {file}")
+
+    input_indices = input("Enter the numbers of the files to plot (comma separated): ")
+    selected_indices = [int(idx.strip()) - 1 for idx in input_indices.split(",")]
+    plt.figure(figsize=(10, 6))
+    selected_files = [f for i,f in enumerate(os.listdir("csv_raw_inferences")) if i in selected_indices]
+    dataframes = [pd.read_csv(os.path.join("csv_raw_inferences", f)) for f in selected_files]
+    levels = sorted(dataframes[0]['Level'].unique())
+    patches = sorted(dataframes[0]['Patch'].unique())
+    saved_plots_dir = "plots_results/ROC_curves"
+    os.makedirs(saved_plots_dir, exist_ok=True)
+    for l in levels:
+        for p in patches:
+            for df, file in zip(dataframes, selected_files):
+                subset = df[(df['Level'] == l) & (df['Patch'] == p)]
+                if subset.empty:
+                    continue
+                fpr, tpr, _ = sk_metrics.roc_curve(subset['TrueLabel'], subset['PredictedProb'])
+                auc = sk_metrics.roc_auc_score(subset['TrueLabel'], subset['PredictedProb'])
+                label = f"{file.replace('.csv', '')} (AUC={auc:.2f})"
+                plt.title(f"ROC Curves Comparison - Level {l} - Patch {p}", fontsize=14)
+                plt.plot(fpr, tpr, label=label.replace("_", " ").replace("raw ", "").replace("Train-", "Train: ").replace("Test-", "Test: ").replace("linear", ""))
+                
+                plt.xlabel('False Positive Rate')
+                plt.ylabel('True Positive Rate')
+                plt.grid()
+                plt.legend(loc='lower right', fontsize='small')
+                plt.tight_layout()
+
+            plt.plot([0, 1], [0, 1], 'k--', label='Random Guess')    
+            save_path = os.path.join(saved_plots_dir, f"ROC_Level_{l}_Patch_{p}.png")
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            plt.close()
+
 
 
 def choosen_acc_to_plot(array_dirs, metric="Accuracy"):
@@ -703,3 +759,4 @@ if __name__ == "__main__":
         test(cross_validate=args['cross_validate'], device=device, model_string=args['classificator_model'], batch_size=args['batch_size'], path_train=dataset_chosen["training"], path_test=dataset_chosen["testing"])
     elif args['mode'] == "draw":
         plot_all_results()
+        plot_ROC_curves()
