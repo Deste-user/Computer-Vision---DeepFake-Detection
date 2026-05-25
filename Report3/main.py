@@ -69,7 +69,7 @@ struct_sets_versions = {
     "v4": {
         "fake_1": fake_data_SG2_path,
         "fake_2": fake_data_StableDiffusion2_path,
-        "names": {"fake_1": "StyleGAN 2.1", "fake_2": {"StableDiffusion2.1"} },
+        "names": {"fake_1": "StyleGAN 2.1", "fake_2": "StableDiffusion2.1" },
         "test_embedding_path": {"fake_1": "dataset_embeddings_v4/test_set/fake_1/embeddings.pt", "fake_2": "dataset_embeddings_v4/test_set/fake_2/embeddings.pt"},
         "patch_attention": ["Corner_TL", "Corner_TR", "Corner_BL", "Corner_BR", "Center_TL", "Center_TR", "Center_BL", "Center_BR"]
     }
@@ -387,6 +387,7 @@ def test(cross_validate=False, device=None, model_string="mlp", batch_size=32, p
         "v1": LEVELS_V1, 
         "v2": LEVELS_V2, 
         "v3": LEVELS_V2,
+        "v4": LEVELS_V2
     }
     
     train_levels = levels_dict[train_vers]
@@ -509,6 +510,12 @@ def plot_all_results(CLS= False):
 
 
 def choosen_acc_to_plot(array_dirs, metric="Accuracy"):
+    if isinstance(metric, str):
+        if metric.lower() in ["both", "all"]:
+            metric = ["Accuracy", "AUC"]
+        else:
+            metric = [metric]
+
     common_levels = None
     dataframes = {}
 
@@ -529,7 +536,7 @@ def choosen_acc_to_plot(array_dirs, metric="Accuracy"):
         return
 
     plt.figure(figsize=(10, 6))
-
+    
     for dir_path, df in dataframes.items():
         df_common = df[df['Level'].isin(common_levels)].sort_values(by=['Patch', 'Level'])
 
@@ -540,12 +547,13 @@ def choosen_acc_to_plot(array_dirs, metric="Accuracy"):
         for patch in df_common['Patch'].unique():
             patch_data = df_common[df_common['Patch'] == patch]
 
-            label_name = f"{patch} ({model_type})"
-            
-            plt.plot(patch_data['Level'], patch_data[metric], marker='o', label=label_name)
+            for m in metric:
+                label_name = f"{patch} ({model_type}) - {m}" if len(metric) > 1 else f"{patch} ({model_type})"
+                plt.plot(patch_data['Level'], patch_data[m], marker='o', label=label_name)
+                
     plt.xticks(common_levels)
     plt.xlabel('Level', fontsize=12)
-    plt.ylabel(metric, fontsize=12)
+    plt.ylabel(", ".join(metric), fontsize=12)
     title =  input("\nName for the plot (without extension): ")
     name = title.replace(" ", "_")
     plt.title(f'{title}', fontsize=14)
@@ -636,7 +644,10 @@ if __name__ == "__main__":
 
 
     if (args['plt_acc_spec']):
-        choosen_acc_to_plot(args['plt_acc_spec'], metric="Accuracy")
+        if (len(args['plt_acc_spec']) == 1):
+            choosen_acc_to_plot(args['plt_acc_spec'], metric="both")
+        else:      
+            choosen_acc_to_plot(args['plt_acc_spec'], metric="Accuracy")
         sys.exit(0)
 
     device = torch.device(args['device'])
