@@ -17,3 +17,9 @@ Report3/dataset_embeddings_v3/*
 Report3/dataset_embeddings_v2/*
 Report3/dataset_embeddings_v1/*
 Report3/wandb/*
+
+
+csv_results/*
+csv_raw_results/*
+wandb/
+**/wandb/
