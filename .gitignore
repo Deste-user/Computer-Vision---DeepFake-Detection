@@ -1,6 +1,6 @@
 
 
 
-dataset_embeddings/*
+**/dataset_embeddings/
 wandb/
 **/wandb/
