@@ -359,12 +359,12 @@ def test(cross_validate=False, device=None, model_string="mlp", batch_size=32, t
     common_levels = LEVELS_V1 if token_mode == "CLS" else LEVELS_V2
     common_patches = ["CLS"] if token_mode == "CLS" else PHYSICAL_PATCH_ORDER
 
-    token_type = f"_{token_mode}"
+    token_type = f"{token_mode}"
 
     if not common_levels or not common_patches:
         raise ValueError(f"CRITICAL ERROR: Nessuna intersezione. Livelli comuni: {len(common_levels)}, Patch comuni: {len(common_patches)}.")
 
-    string_cross_val = f"Train-{train_name}_Test-{test_name}_" if cross_validate else f"{test_name}_"
+    string_cross_val = f"Train-{train_name}_Test-{test_name}" if cross_validate else f"{test_name}"
     
     test_loader = get_separated_dataloaders(test_dataset, token_mode, batch_size=batch_size, split='test_set')
     ds_test = torch.utils.data.ConcatDataset([test_loader['real'].dataset, test_loader[test_dataset].dataset])
@@ -439,8 +439,8 @@ def test(cross_validate=False, device=None, model_string="mlp", batch_size=32, t
                 
     os.makedirs("csv_results", exist_ok=True)
     os.makedirs("csv_raw_inferences", exist_ok=True)
-    csv_name = f"csv_results/{string_cross_val}{token_type}{model_string}.csv"
-    csv_raw_name = f"csv_raw_inferences/raw_{string_cross_val}{token_type}{model_string}.csv"
+    csv_name = f"csv_results/{string_cross_val}_{token_type}_{model_string}.csv"
+    csv_raw_name = f"csv_raw_inferences/raw_{string_cross_val}_{token_type}_{model_string}.csv"
     pd.DataFrame(results).to_csv(csv_name, index=False)
     pd.DataFrame(raw_inference_data).to_csv(csv_raw_name, index=False)
 
@@ -572,17 +572,16 @@ def choosen_acc_to_plot(array_dirs, metric="Accuracy"):
     plt.ylabel(", ".join(metric), fontsize=12)
     title =  input("\nName for the plot (without extension): ")
     name = title.replace(" ", "_")
-    plt.title(f'{title}', fontsize=14)
+    plt.title(f'{title.replace("_", " ")}', fontsize=14)
     plt.grid(True, linestyle='--', alpha=0.6)
     
-    # Sposto la legenda fuori dal grafico se ci sono tante linee
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+
+    plt.legend(loc='lower right', fontsize='small')
     plt.tight_layout()
 
-    #Insert name of the plot based on the files compared
-
+    os.makedirs("plots_results/SpecificPlots", exist_ok=True)
     
-    plt.savefig(f"plots_results/{name}.png", dpi=300)
+    plt.savefig(f"plots_results/SpecificPlots/{name}.png", dpi=300)
 
 
 
@@ -657,6 +656,11 @@ if __name__ == "__main__":
                     evidence_patch(img_path, folder_name=fold, idx=c)
         sys.exit(0)
 
+    if (args['plot_results']):
+        plot_all_results()
+        sys.exit(0)
+
+
     if (args['plt_acc_spec']):
         if (len(args['plt_acc_spec']) == 1):
             choosen_acc_to_plot(args['plt_acc_spec'], metric="both")
@@ -676,7 +680,7 @@ if __name__ == "__main__":
         train(model_string=args['classificator_model'], device=device, num_epochs=args['num_epochs'], batch_size=args['batch_size'], train_dataset=dataset_target, token_mode=token_mode)
     elif args['mode'] == "test":
 
-        dataset_options = list(DATASETS.keys())
+        dataset_options = [k for k, v in DATASETS.items() if token_mode in v.get("modes", ["CLS", "PATCHES"])]
         menu_descriptions = []
 
         for ds_key in dataset_options:
