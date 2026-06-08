@@ -493,7 +493,6 @@ def plot_ROC_curves():
 
     input_indices = input("Enter the numbers of the files to plot (comma separated): ")
     selected_indices = [int(idx.strip()) - 1 for idx in input_indices.split(",")]
-    plt.figure(figsize=(10, 6))
     selected_files = [f for i,f in enumerate(os.listdir("csv_raw_inferences")) if i in selected_indices]
     dataframes = [pd.read_csv(os.path.join("csv_raw_inferences", f)) for f in selected_files]
     levels = sorted(dataframes[0]['Level'].unique())
@@ -502,6 +501,9 @@ def plot_ROC_curves():
     os.makedirs(saved_plots_dir, exist_ok=True)
     for l in levels:
         for p in patches:
+
+            plt.figure(figsize=(10, 6))
+
             for df, file in zip(dataframes, selected_files):
                 subset = df[(df['Level'] == l) & (df['Patch'] == p)]
                 if subset.empty:
@@ -597,16 +599,16 @@ def evidence_patch(img_path, folder_name,idx ,patch_dim=14, resize_to=224):
     # Dizionario con sintassi corretta: "Nome": ((coord_x, coord_y), "colore")
     patches_data = {
         # ANGOLI (Corners)
-        "Corner_TL": ((0, 0), "green"),                                     # Top-Left
-        "Corner_TR": ((w - patch_dim, 0), "red"),                           # Top-Right
-        "Corner_BL": ((0, h - patch_dim), "blue"),                          # Bottom-Left
-        "Corner_BR": ((w - patch_dim, h - patch_dim), "orange"),            # Bottom-Right
+        "Corner_TL": ((0, 0), "pink"),                                     # Top-Left
+        "Corner_TR": ((w - patch_dim, 0), "grey"),                           # Top-Right
+        "Corner_BL": ((0, h - patch_dim), "purple"),                          # Bottom-Left
+        "Corner_BR": ((w - patch_dim, h - patch_dim), "brown"),            # Bottom-Right
         
         # CENTRI (Centers)
-        "Center_TL": ((mid_x - patch_dim, mid_y - patch_dim), "pink"),      # Centro Top-Left
-        "Center_TR": ((mid_x, mid_y - patch_dim), "grey"),                  # Centro Top-Right
-        "Center_BL": ((mid_x - patch_dim, mid_y), "purple"),                # Centro Bottom-Left
-        "Center_BR": ((mid_x, mid_y), "brown")                              # Centro Bottom-Right
+        "Center_TL": ((mid_x - patch_dim, mid_y - patch_dim), "green"),      # Centro Top-Left
+        "Center_TR": ((mid_x, mid_y - patch_dim), "red"),                  # Centro Top-Right
+        "Center_BL": ((mid_x - patch_dim, mid_y), "blue"),                # Centro Bottom-Left
+        "Center_BR": ((mid_x, mid_y), "orange")                              # Centro Bottom-Right
     }
     
     alpha = 100
