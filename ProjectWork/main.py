@@ -47,7 +47,7 @@ DATASETS = {
     "sdv1_4": {"path": fake_data_StableDiffusion_path, "name": "Stable Diffusion v1.4", "modes": ["CLS", "PATCHES"]},
     "stylegan3": {"path": fake_data_SG3_path, "name": "StyleGAN 3", "modes": ["PATCHES"]},
     "styleganxl": {"path": fake_data_SGXL_path, "name": "StyleGAN XL", "modes": ["PATCHES"]},
-    "stylegan2": {"path": fake_data_SG2_path, "name": "StyleGAN 2.1", "modes": ["PATCHES"]},
+    "stylegan2": {"path": fake_data_SG2_path, "name": "StyleGAN 2", "modes": ["PATCHES"]},
     "sdv2_1": {"path": fake_data_StableDiffusion2_path, "name": "Stable Diffusion 2.1", "modes": ["PATCHES"]}
 }
 
@@ -172,7 +172,7 @@ def get_separated_dataloaders(target_dataset_key, token_mode, batch_size=32, spl
 # =============================================
 
 
-
+# This function evaluates the validation set for all patches at a specific level, calculating loss and accuracy for each patch while considering early stopping based on patience.
 def validation_all_patches(models, data_val, level_idx, num_levels, num_patches, input_dim, patiences, device,patch_names):
     for m in models: m.eval()
     criterion = nn.CrossEntropyLoss()
@@ -350,7 +350,7 @@ def train(model_string='mlp', device=None, num_epochs=10, batch_size=32, train_d
             wb.finish()              
         
                      
-
+# Function to test the trained classificators on the test set of the specified dataset, evaluating accuracy and AUC for each level and patch, and saving results to CSV files.
 def test(cross_validate=False, device=None, model_string="mlp", batch_size=32, train_dataset="stylegan1", test_dataset="stylegan1", token_mode="CLS", save_results=True):
 
     train_name = DATASETS[train_dataset]["name"].replace(" ", "")
@@ -484,7 +484,7 @@ def plot_all_results(CLS= False):
     return                 
 
 
-
+# Function to plot ROC curves for selected CSV files containing raw inference data, allowing comparison of different models/datasets at various levels and patches.
 def plot_ROC_curves():
     print("Select roc curves to plot:")
     for i, file in enumerate(os.listdir("csv_raw_inferences")):
@@ -517,7 +517,7 @@ def plot_ROC_curves():
                 plt.xlabel('False Positive Rate')
                 plt.ylabel('True Positive Rate')
                 plt.grid()
-                plt.legend(loc='lower right', fontsize='small')
+                plt.legend(loc='lower right', fontsize='large')
                 plt.tight_layout()
 
             plt.plot([0, 1], [0, 1], 'k--', label='Random Guess')    
@@ -526,7 +526,7 @@ def plot_ROC_curves():
             plt.close()
 
 
-
+# This function allows the user to select specific CSV files containing accuracy results and plot them together for comparison, focusing on common levels and patches across the selected files.
 def choosen_acc_to_plot(array_dirs, metric="Accuracy"):
     if isinstance(metric, str):
         if metric.lower() in ["both", "all"]:
@@ -596,7 +596,6 @@ def evidence_patch(img_path, folder_name,idx ,patch_dim=14, resize_to=224):
     w, h = img.width, img.height
     mid_x, mid_y = w // 2, h // 2
     
-    # Dizionario con sintassi corretta: "Nome": ((coord_x, coord_y), "colore")
     patches_data = {
         # ANGOLI (Corners)
         "Corner_TL": ((0, 0), "pink"),                                     # Top-Left
